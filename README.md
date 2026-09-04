@@ -85,6 +85,7 @@ iparecomp is a lifting project from day one.
 | `tools/ipa_host.cpp` | Loads a binary and prints the outstanding-import work list, grouped by the framework that owes each symbol. |
 | `runtime/macho_image` | Parses a fat or thin Mach-O, picks an ARM slice, maps its segments, records the slide, and resolves every undefined symbol to the dylib that owes it. Refuses an encrypted image by name. |
 | `runtime/arm32_context.h` | Guest CPU state and the operations lifted code emits — the emitter's target. Barrel shifter with its separate carry-out, unpacked flags, condition predicates, interworking helpers. |
+| `tools/objc_dump.py` | Reads the Objective-C class table straight out of `__DATA` -- classes, methods, selectors, and each method's implementation address. An iOS host contract is a set of classes, and this is how you discover one. |
 | `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
 
 ## Building
@@ -178,3 +179,10 @@ enough to lift in full and check against an emulator.
 
 - [canabaltrecomp](https://github.com/sp00nznet/canabaltrecomp) — Canabalt
   (Semi Secret Software, 2009). 626 functions, no interworking, 14 frameworks.
+  Chosen as the **emitter's calibration target**: Semi Secret open-sourced the
+  game in full, so the original armv6 binary and the source it was built from
+  are both available. Lifted output can be checked against ground truth, which
+  is not normally possible.
+
+Angry Birds (armv6, decrypted, 3,633 functions, 21% Thumb) is the first real
+preservation port, once the emitter handles interworking.

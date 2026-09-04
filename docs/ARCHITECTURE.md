@@ -187,3 +187,30 @@ the ObjC runtime, and all three are shared across every port.
 
 That sharing is the point of keeping this repo app-agnostic. The second port
 should cost a fraction of the first.
+
+## Calibrating the emitter
+
+An emitter needs an oracle, and there are two kinds available here.
+
+The general one is differential: run a lifted function and an emulated one on
+the same inputs with the image at the same address, and compare registers,
+flags and memory. That works for any target and is how the emitter will be
+checked at scale.
+
+The better one exists for exactly one game. Semi Secret Software released
+[Canabalt for iOS](https://github.com/ericjohnson/canabalt-ios) in full,
+including the MIT-licensed `flixel-ios` engine the class table here reveals —
+`FlxGame`, `FlxSprite`, `FlxGLView`, `FlxState`. So for that binary there is
+source-level ground truth: what a lifted function is *supposed* to compute can
+be read, not merely compared against another black box.
+
+That normally disqualifies a target — a game with public source does not need
+recompiling. It is the reason to pick this one anyway. Bringing up a 32-bit
+ARM emitter means being wrong in subtle ways about condition codes, shifter
+carries and interworking, and a target where the intended semantics are
+readable turns a week of bisecting into an afternoon. It is the calibration
+weight, not the product.
+
+Angry Birds is the first target chosen for its own sake: decrypted armv6, 3,633
+functions, no source anywhere, and it has not run on a shipping device since
+iOS 11.
