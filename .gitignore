@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# App content never enters this repo. You bring your own .ipa.
+# ---------------------------------------------------------------------------
+*.ipa
+*.app/
+Payload/
+*.dylib
+*.framework/
+extracted/
+work/
+assets/
+*.plist
+!Info.plist.example
+
+# Lifter output is derived from the app binary -- also never committed.
+recompiled/
+generated/
+
+# Save data / personal
+saves/
+.env
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+build/
+cmake-build-*/
+out/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vs/
+.vscode/
+.idea/
+*.sln
+*.vcxproj*
+.DS_Store
+
+# tool output
+probe.txt
+run.txt
+triage.md

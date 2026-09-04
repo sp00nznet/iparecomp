@@ -1,0 +1,180 @@
+# iparecomp
+
+> A toolkit for turning old iOS apps' binaries into native desktop
+> applications. Bring your own `.ipa`.
+
+**Status: the loader and the triage tools work.** `ipa_host` parses a 32-bit
+ARM Mach-O, maps it, and prints an exact per-framework work list.
+`ipa_probe.py` triages a candidate in seconds, including the one check that
+decides everything. The emitter is the next milestone. See
+[Milestones](#milestones).
+
+---
+
+## What this is
+
+The iPhone 3G era — iPhone OS 2.0 through 3.x, 2008 to 2010, when the App
+Store first opened — produced a large catalogue of games that runs on nothing
+today. The binaries are 32-bit ARM Mach-O, armv6 or armv7, and no current
+device executes that natively. Apple dropped 32-bit support entirely in iOS 11.
+
+That catalogue is the target. Same philosophy as
+[androidrecomp](https://github.com/sp00nznet/androidrecomp), aimed at the other
+platform: replace the host, satisfy the import surface, lift the machine code
+to C, and get an ordinary native executable out — no emulator, no jailbreak, no
+device.
+
+**This repository is deliberately app-agnostic.** A port supplies its own
+bundle contract and links the library here. Nothing title-specific belongs in
+this repo — that separation is much cheaper to keep than to retrofit.
+
+The name is the file extension, not the platform. Nothing here uses Apple's
+branding, trademarks, code, headers or SDKs.
+
+## Legal / content policy
+
+Tools only. No app code, no app assets, no extracted art, no save data, no
+publisher binaries — `.gitignore` blocks all of it, deliberately. You supply
+your own legally obtained `.ipa`; everything here operates on a file you
+already have. Licensed MIT; contributions must be your own work.
+
+## Three things that make this harder than ARM64 Android
+
+Worth knowing before writing a line, because each one shapes the design.
+
+**1. `__TEXT` may be encrypted, and then nothing else matters.** App Store
+binaries ship under FairPlay: an `LC_ENCRYPTION_INFO` load command with
+`cryptid=1`, and the text section is ciphertext. No amount of shim work helps
+— the lifter would be reading noise. This is triage gate one, and
+`ipa_probe.py` checks it first and stops there:
+
+```
+## STOP -- `__TEXT` is FairPlay-encrypted
+
+`LC_ENCRYPTION_INFO` cryptid=1, 1,228,800 bytes from 0x1000.
+Nothing below this line is meaningful: the bytes the lifter would read
+are ciphertext. A decrypted dump of the same binary is required.
+```
+
+**2. There are two instruction sets in one binary.** 32-bit ARM mixes ARM
+(4-byte) and Thumb (2- and 4-byte) encodings, switched by `bx`/`blx` and
+selected by the low bit of a target address. The encoding alone does not say
+which a given byte is; decode Thumb as ARM and you get plausible-looking
+garbage. ARM64 had no equivalent of this, and it is the single largest source
+of new work.
+
+The symbol table's `N_ARM_THUMB_DEF` bit is the only reliable record of which
+set each function is in, which makes a *stripped* binary considerably worse
+than a merely-old one.
+
+**3. Most control flow is `objc_msgSend`.** An iOS app dispatches dynamically
+by selector, and no static analysis resolves that. So it is not lifted at all
+— it becomes a shim boundary. The ObjC half of the app is answered by a
+runtime while the C/C++ half is compiled, which is what makes a game with 38
+classes and 866 selectors a far smaller job than its framework list suggests.
+
+There is also no easy path: androidrecomp gets to run its target natively on an
+arm64 host and debug the shim before any lifting exists. Nothing runs armv6, so
+iparecomp is a lifting project from day one.
+
+## What you get
+
+| Piece | What it does |
+|---|---|
+| `tools/ipa_probe.py` | Feasibility triage for a new title: encryption status, arch slices, function count and `__text` coverage, the ARM/Thumb split, the framework list, and Objective-C weight. Reads an `.ipa` directly. |
+| `tools/ipa_host.cpp` | Loads a binary and prints the outstanding-import work list, grouped by the framework that owes each symbol. |
+| `runtime/macho_image` | Parses a fat or thin Mach-O, picks an ARM slice, maps its segments, records the slide, and resolves every undefined symbol to the dylib that owes it. Refuses an encrypted image by name. |
+| `runtime/arm32_context.h` | Guest CPU state and the operations lifted code emits — the emitter's target. Barrel shifter with its separate carry-out, unpacked flags, condition predicates, interworking helpers. |
+| `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
+
+## Building
+
+CMake 3.20+ and any C++17 compiler. zlib and SDL2 are optional.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+./build/arc_selftest                       # ARM semantics, no .ipa needed
+./build/ipa_host path/to/Payload/Game.app/Game
+```
+
+On Windows add `-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake`
+so CMake finds zlib and SDL2. A toolchain file only takes effect on a fresh
+cache, so delete `build/` if you add it later.
+
+Triage a new title before committing to it:
+
+```sh
+pip install capstone
+python tools/ipa_probe.py Game.ipa --out triage.md
+```
+
+## Method
+
+Point `ipa_probe.py` at an `.ipa`. The numbers that decide whether a port is
+weeks or impossible, in the order they matter:
+
+- **`cryptid`.** Nonzero and you are done; find a decrypted dump instead.
+- **Percentage Thumb.** A binary that is entirely one instruction set is a
+  dramatically easier first lift, because interworking never arises. Anything
+  above zero means the emitter needs both decoders and the dispatcher must
+  carry the mode bit.
+- **`__text` coverage from the symbol table.** These binaries predate
+  `LC_FUNCTION_STARTS`, so symbols are the only boundary evidence, and the
+  uncovered remainder is literal pools mixed into the code. Expect 80–92%, not
+  the 100% an NDK build's `.eh_frame` gives you.
+- **Selector reference count.** How much of the app is dynamic dispatch that
+  the ObjC runtime must answer rather than the lifter.
+- **The framework list.** This is the shim surface, and it is the one place
+  iOS is *kinder* than Android: every undefined symbol names the dylib that
+  owes it, so the work list is exact rather than guessed from name prefixes.
+
+Then `ipa_host` turns the remaining unknowns into a work list that shrinks.
+
+## Measured on real binaries
+
+Three iOS 3.x games, probed with the tools in this repo:
+
+| | Canabalt | Angry Birds Rio | Cut the Rope |
+|---|---|---|---|
+| slice | armv6 | armv6 | armv6 + armv7 |
+| `__TEXT` | decrypted | decrypted | **FairPlay, cryptid=1** |
+| `__text` | 0.19 MB | 1.99 MB | — |
+| functions | 626 | 3,633 | — |
+| coverage | 80.1% | 91.1% | — |
+| instructions | 37,185 | 494,331 | — |
+| **Thumb** | **0%** | 21% | — |
+| undefined symbols | 205 | 354 | 487 |
+| frameworks | 14 | 14 | — |
+| ObjC classes / selrefs | — | 38 / 866 | — |
+
+Canabalt being 100% ARM is why it was picked as the first port: the emitter can
+be built and validated with no interworking at all, and 626 functions is small
+enough to lift in full and check against an emulator.
+
+## Milestones
+
+- [x] **M0 — triage.** `ipa_probe.py`: encryption gate, slice selection,
+      per-function ARM/Thumb disassembly, coverage, ObjC weight.
+- [x] **M1 — loader.** Fat and thin Mach-O parsed, segments mapped, slide
+      recorded, imports resolved to owing frameworks.
+- [x] **M2 — the emitter's target.** `arm32_context.h`, with the shifter and
+      flag semantics checked against hardware behaviour.
+- [ ] **M3 — decoder.** armv6/armv7 and Thumb-2 to an internal form, verified
+      against capstone on real harvested instructions.
+- [ ] **M4 — emitter.** That form to C, one function per unit. Condition codes
+      as predicates, PC reads folded to constants at lift time, `ldm`/`pop`
+      writing PC recognised as return or indirect branch.
+- [ ] **M5 — differential test.** Whole lifted functions against an emulator
+      with the image at the same address on both sides.
+- [ ] **M6 — ObjC runtime.** Class realization from `__objc_classlist`,
+      `objc_msgSend` by selector.
+- [ ] **M7 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,
+      CoreGraphics, OpenAL, AudioToolbox.
+- [ ] **M8 — a window.**
+
+## Ports
+
+- [canabaltrecomp](https://github.com/sp00nznet/canabaltrecomp) — Canabalt
+  (Semi Secret Software, 2009). 626 functions, no interworking, 14 frameworks.
