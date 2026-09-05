@@ -58,9 +58,12 @@ class MachOImage {
   // __TEXT is still encrypted.
   bool Load(const std::string& path, const std::string& want_arch = "");
 
-  // Reserves the image's vm range and copies each segment in at its own
-  // offset, then applies page protections. Guest pointers become host
-  // pointers from here on.
+  // Maps the image at its own link address -- not somewhere convenient. The
+  // file records no relocations, so it cannot be slid, and Map() fails rather
+  // than placing it somewhere every absolute pointer in it would be wrong.
+  // The first 64 KB is left unmapped: no desktop OS will hand it out, and
+  // after the lifter folds literal-pool loads nothing reads it. Guest pointers
+  // become host pointers from here on.
   bool Map();
 
   // Binds one import to a host address. Everything still null after the shim
@@ -77,6 +80,11 @@ class MachOImage {
 
   bool encrypted() const { return encrypted_; }
   uint32_t entry() const { return entry_; }
+  // Where the image was linked, which after a successful Map() is also where
+  // it is. This is what a lifted program wants as its `image_base`.
+  uint32_t link_base() const { return link_base_; }
+  // Always zero after Map() succeeds. Kept because a nonzero value is the
+  // single clearest way to say that something has gone wrong.
   uint32_t slide() const { return slide_; }
   const std::string& arch() const { return arch_; }
   const std::string& error() const { return error_; }
@@ -95,8 +103,13 @@ class MachOImage {
   std::vector<Export> exports_;
   std::vector<std::string> dylibs_;
   std::string arch_, error_;
-  uint32_t entry_ = 0, slide_ = 0;
+  uint32_t entry_ = 0, slide_ = 0, link_base_ = 0;
   bool encrypted_ = false;
+
+  // The lowest address a desktop OS will hand out: Windows reserves the first
+  // 64 KB as the null-pointer partition, and Linux's vm.mmap_min_addr defaults
+  // to the same.
+  static constexpr uint32_t kLowAddressFloor = 0x10000;
 };
 
 }  // namespace arc

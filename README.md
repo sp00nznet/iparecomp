@@ -3,10 +3,11 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the emitter works and is checked against an emulator.** All 626 of
-Canabalt's functions lift to C completely, the result compiles, and 5,985
-differential cases over 159 operand forms agree with Unicorn instruction for
-instruction. `ipa_probe.py` still triages a new candidate in seconds. What is
+**Status: the emitter works, and the game loads where it has to.** All 626 of
+Canabalt's functions lift to C completely and the result compiles; 62,421
+per-instruction and 3,000 whole-function differential cases agree with Unicorn.
+The image maps at its own link address on Windows with a zero slide, which is
+the only place a binary carrying no relocations can correctly go. What is
 missing is the runtime beneath the lifted code: the ObjC dispatch, the
 framework shims, and a window. See [Milestones](#milestones).
 
@@ -187,18 +188,18 @@ enough to lift in full and check against an emulator.
       `-Wall`.
 - [x] **M5 — differential test.** Per instruction: 62,421 cases over 159
       operand forms, 100% agreement with Unicorn on registers, flags, the
-      vector file and memory. Whole functions: 100% over the 12 of Canabalt's
-      152 self-contained functions that can be tested today -- the other 140
-      are blocked on M6, not on the emitter.
-- [ ] **M6 — the slide.** These binaries are non-PIE with an empty rebase
-      table, so nothing records which words are pointers, and the image cannot
-      be mapped anywhere but its link address -- which is below both Windows'
-      and Linux's floor. Measured: 139 of Canabalt's 152 self-contained
-      functions load a pointer out of a literal pool, and 5,062 of 5,130 such
-      literals are unambiguous. See
+      vector file and memory. Whole functions: 3,000 cases over 150 of
+      Canabalt's 152 self-contained functions, also 100%.
+- [x] **M6 — the slide.** These binaries are non-PIE with an empty rebase
+      table, so nothing records which words are pointers and the image cannot
+      be slid at all -- but its link address is below the 64 KB floor every
+      desktop OS enforces. Solved exactly, with no heuristic: the lifter folds
+      all 5,852 literal-pool loads into constants, which leaves `__TEXT,__text`
+      -- the only section below the floor -- with no run-time reader at all.
+      The loader then maps every segment at its link address from `0x10000` up,
+      the slide is zero, and the unmappable first 64 KB serves as the guard
+      page. See
       [The slide has to be zero](docs/ARCHITECTURE.md#the-slide-has-to-be-zero).
-      This gates every function that touches a global, so it comes before the
-      runtime.
 - [ ] **M7 — ObjC runtime.** Class realization from `__objc_classlist`,
       `objc_msgSend` by selector.
 - [ ] **M8 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,

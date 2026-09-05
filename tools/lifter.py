@@ -116,6 +116,12 @@ class Lifter:
         self.insns_lifted = 0
         self.link_base = 0
         self.thumb = False
+        # The image itself, so a literal-pool load can be resolved while
+        # lifting rather than at run time. Set by load(); without it the fold
+        # simply does not happen and the load is emitted as a load.
+        self.image: bytes = b""
+        self.ro_range = (0, 0)   # the read-only span a fold is allowed inside
+        self.folded = 0
 
     # --- naming ------------------------------------------------------------
 
@@ -484,6 +490,40 @@ class Lifter:
         wb = f"ARC_W(c, {base}, a);" if ins.writeback else ""
         return addr, wb, base
 
+    def literal(self, addr: int, size: int):
+        """The value at `addr`, if it is fixed for the life of the program.
+
+        A literal-pool load reads read-only memory at an address the emitter
+        already knows, so the value is a constant and can be emitted as one.
+        This is exact, not a heuristic: `__TEXT` is mapped r-x and there is no
+        instruction in the image that could write it.
+
+        It matters for more than speed. `__TEXT,__text` is the only section of
+        these binaries that lies below the 64 KB floor every desktop OS puts on
+        low mappings, and its only run-time readers are these loads. Fold them
+        and the image never needs a byte mapped below `0x10000`, which is what
+        lets it load at its link address with no slide -- and a zero slide is
+        what makes every unrebased absolute pointer in the file correct.
+        """
+        lo, hi = self.ro_range
+        if not self.image or addr < lo or addr + size > hi:
+            return None
+        off = addr - self.link_base
+        if off < 0 or off + size > len(self.image):
+            return None
+        chunk = self.image[off:off + size]
+        return int.from_bytes(chunk, "little")
+
+    def pc_literal(self, ins, mem_index: int, size: int):
+        """The constant a PC-relative load reads, or None if it is not one."""
+        ops = ins.operands
+        mem = ops[mem_index].mem
+        if self.reg(ins, mem.base) != 15 or mem.index or ins.writeback:
+            return None
+        if mem_index + 1 < len(ops):   # post-indexed: the base moves
+            return None
+        return self.literal(self.pc_value(ins) + mem.disp, size)
+
     def _load(self, ins, op: str) -> str:
         suffix = op[3:]
         if suffix not in WIDTH:
@@ -496,6 +536,13 @@ class Lifter:
         macro = {1: "ARC_LD8", 2: "ARC_LD16", 4: "ARC_LD32"}[size]
         if signed:
             macro += "S"
+        if len(rt) == 1 and rt[0] != 15:
+            value = self.pc_literal(ins, mem_index, size)
+            if value is not None:
+                if signed and value >> (size * 8 - 1):
+                    value -= 1 << (size * 8)
+                self.folded += 1
+                return self.write(rt[0], f"{value & 0xFFFFFFFF:#x}u")
         # The address goes into a temporary before anything is written back or
         # loaded. A load pair whose base register is also its first destination
         # would otherwise read its second element through the value the first
@@ -656,8 +703,15 @@ class Lifter:
         v = self.vreg(ins, ops[0].reg)
         if v is None:
             raise Unsupported(form(ins))
-        addr, wb, _ = self._mem_address(ins, 1)
         idx, kind = v
+        if op == "vldr":
+            value = self.pc_literal(ins, 1, 4 if kind == "s" else 8)
+            if value is not None:
+                self.folded += 1
+                view = "SU" if kind == "s" else "DU"
+                suffix = "u" if kind == "s" else "ull"
+                return f"ARC_{view}(c, {idx}) = {value:#x}{suffix};"
+        addr, wb, _ = self._mem_address(ins, 1)
         if op == "vldr":
             access = (f"ARC_SU(c, {idx}) = ARC_LD32(a);" if kind == "s"
                       else f"ARC_DU(c, {idx}) = ARC_LD64(a);")
@@ -1031,6 +1085,26 @@ def load(path: str, want: str = ""):
     return exe, link_base, addr, code, probe.functions(m)
 
 
+def read_only_span(path: str, want: str = "") -> tuple[int, int]:
+    """The address range a literal fold is allowed to read from.
+
+    __TEXT only. It is the segment mapped r-x, so nothing in the program can
+    write it, which is the property the fold depends on.
+    """
+    _, data, _ = probe.read_app(path)
+    ms, _ = probe.slices(data)
+    m = ms[0]
+    if want:
+        for s in ms:
+            if probe.ARM_SUBTYPE.get(s.cpusubtype & 0xFF) == want:
+                m = s
+                break
+    for name, vmaddr, vmsize, _, filesize, _ in m.segments:
+        if name == "__TEXT":
+            return vmaddr, vmaddr + min(vmsize, filesize)
+    return (0, 0)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("binary", help=".ipa, .app directory, or a bare Mach-O")
@@ -1046,6 +1120,8 @@ def main() -> None:
     lifter = Lifter()
     lifter.link_base = link_base
     lifter.starts = {a for a, _, _ in fns}
+    _, lifter.image = mapped_image(args.binary, args.slice)
+    lifter.ro_range = read_only_span(args.binary, args.slice)
 
     print(f"{exe}: {len(fns):,} functions, __text {len(code) / 1e6:.2f} MB "
           f"@ {text_addr:#x}, link base {link_base:#x}")
@@ -1066,6 +1142,8 @@ def main() -> None:
     print(f"\nfunctions complete : {complete:,} / {len(bodies):,}  ({pct_fn:.1f}%)")
     print(f"instructions lifted: {lifter.insns_lifted:,} / "
           f"{lifter.insns_total:,}  ({pct_in:.1f}%)")
+    print(f"literals folded    : {lifter.folded:,}  "
+          f"(reads of __TEXT resolved at lift time, so none remain at run time)")
 
     if args.report and lifter.blamed:
         print("\nby functions broken -- what to write next:")

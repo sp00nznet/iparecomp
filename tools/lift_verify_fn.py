@@ -178,8 +178,9 @@ def main() -> None:
     # loader would lay it out -- a function reaching a global
     # reads __DATA, and mapping only the code section reports
     # that as a wild pointer.
+    V.IMAGE_BASE = link_base
     _, image_full = L.mapped_image(args.binary, args.slice)
-    image_size = V.align_up(len(image_full))
+    image_size = V.align_up(V.IMAGE_BASE + len(image_full)) - V.IMAGE_BASE
     image_full = image_full.ljust(image_size, b"\0")
 
     # Each case is a call into the already-generated program, so the emitter
@@ -226,7 +227,7 @@ def main() -> None:
     in_path, out_path = (os.path.join(workdir, "in.bin"),
                          os.path.join(workdir, "out.bin"))
     with open(in_path, "wb") as fh:
-        fh.write(image_full)
+        fh.write(image_full[V.IMAGE_FLOOR - V.IMAGE_BASE:])
         for (regs, flags, vec, fpscr, scratch) in states:
             fh.write(V.pack_ctx(regs, flags, vec, fpscr, ctx_size))
             fh.write(scratch)

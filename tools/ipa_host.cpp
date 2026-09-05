@@ -87,17 +87,35 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  uint32_t lo = 0xFFFFFFFFu, hi = 0;
+  uint32_t hi = 0;
   for (const auto& s : img.segments()) {
-    if (!s.vmsize) continue;
-    lo = std::min(lo, s.vmaddr);
+    if (!s.vmsize || s.name == "__PAGEZERO") continue;
     hi = std::max(hi, s.vmaddr + s.vmsize);
   }
-  std::printf("\nbase       %08X, span %.1f MB\n", lo, (hi - lo) / 1e6);
-  std::printf("slide      %08X\n", img.slide());
+  std::printf("\nlink base  %08X, span %.1f MB\n", img.link_base(),
+              (hi - img.link_base()) / 1e6);
+  // The slide is always zero, and saying so is the point: these binaries carry
+  // no relocations, so an image anywhere but its link address would have every
+  // absolute pointer in it wrong.
+  std::printf("slide      %08X%s\n", img.slide(),
+              img.slide() ? "  -- WRONG, the image cannot be slid" : "");
   std::printf("segments   %zu\n", img.segments().size());
-  for (const auto& s : img.segments())
-    std::printf("           %-12s %08X +%#x\n", s.name.c_str(), s.vmaddr, s.filesize);
+  for (const auto& s : img.segments()) {
+    // Where each segment actually landed, so "mapped at its link address" is
+    // something the tool demonstrates rather than something it claims. A
+    // segment below the low floor is left unmapped on purpose: no desktop OS
+    // hands out the first 64 KB, and once the lifter folds literal-pool loads
+    // nothing reads it.
+    const char* note = "";
+    if (!s.mapped)
+      note = s.name == "__PAGEZERO" ? "  (not mapped, by design)"
+                                    : "  (below the 64 KB floor, unmapped)";
+    else if (uintptr_t(s.mapped) != uintptr_t(s.vmaddr) &&
+             uintptr_t(s.mapped) != uintptr_t(0x10000))
+      note = "  -- NOT at its link address";
+    std::printf("           %-12s %08X +%#-8x host %p%s\n", s.name.c_str(),
+                s.vmaddr, s.filesize, s.mapped, note);
+  }
 
   const size_t thumb = img.thumb_count();
   const size_t total = img.exports().size();

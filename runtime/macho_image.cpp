@@ -246,36 +246,68 @@ size_t MachOImage::thumb_count() const {
 bool MachOImage::Map() {
   if (segments_.empty()) { error_ = "nothing to map"; return false; }
 
+  // The image loads at its own link address and nowhere else, and that is a
+  // property of the file rather than a preference. These binaries are non-PIE
+  // with an empty rebase table -- 0 rebase opcodes, 0 local relocations -- so
+  // nothing records which words are pointers, and an absolute pointer in
+  // __DATA cannot be corrected after the fact. Only a zero slide leaves it
+  // right.
+  //
+  // What makes that affordable is the lifter: it folds every literal-pool load
+  // into a constant, and __TEXT,__text is the only section that lies below the
+  // 64 KB floor every desktop OS puts on low mappings. So the bytes down there
+  // have no run-time reader, the region is simply left unmapped, and the OS's
+  // own refusal to hand it out becomes a guard page for free -- anything that
+  // does read it faults immediately instead of quietly reading a zero.
   uint32_t lo = 0xFFFFFFFFu, hi = 0;
   for (const auto& s : segments_) {
-    if (s.vmsize == 0) continue;
+    if (s.vmsize == 0 || s.name == "__PAGEZERO") continue;
     lo = std::min(lo, s.vmaddr);
     hi = std::max(hi, s.vmaddr + s.vmsize);
   }
   if (hi <= lo) { error_ = "empty vm range"; return false; }
-  size_t span = hi - lo;
+  link_base_ = lo;
+
+  const uint32_t floor = lo > kLowAddressFloor ? lo : kLowAddressFloor;
+  if (hi <= floor) { error_ = "the whole image sits below the low floor"; return false; }
+  const size_t span = hi - floor;
 
 #if defined(_WIN32)
-  void* region = VirtualAlloc(nullptr, span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  void* region = VirtualAlloc(reinterpret_cast<LPVOID>(uintptr_t(floor)), span,
+                              MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-  void* region = mmap(nullptr, span, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void* region = mmap(reinterpret_cast<void*>(uintptr_t(floor)), span,
+                      PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
   if (region == MAP_FAILED) region = nullptr;
 #endif
-  if (!region) { error_ = "could not reserve the image range"; return false; }
+  if (region != reinterpret_cast<void*>(uintptr_t(floor))) {
+    error_ = "could not map the image at its link address; it cannot be slid, "
+             "because the file records no relocations";
+    return false;
+  }
 
-  // These binaries were linked to a fixed address; the slide is how far from
-  // that we actually landed, and every PC-derived constant is relative to it.
-  slide_ = uint32_t(uintptr_t(region)) - lo;
+  // Zero, and checked rather than computed. If this is ever nonzero the image
+  // is in the wrong place and every absolute pointer in it is wrong with it.
+  slide_ = 0;
 
   for (auto& s : segments_) {
-    if (s.filesize == 0) continue;
+    if (s.filesize == 0 || s.name == "__PAGEZERO") continue;
     if (slice_ + s.fileoff + s.filesize > file_.size()) {
       error_ = "segment " + s.name + " runs past the end of the file";
       return false;
     }
-    uint8_t* dst = static_cast<uint8_t*>(region) + (s.vmaddr - lo);
-    memcpy(dst, file_.data() + slice_ + s.fileoff, s.filesize);
+    // A segment straddling the floor is copied from the floor up; the part
+    // below is the code nothing reads.
+    uint32_t from = s.vmaddr;
+    uint32_t skip = 0;
+    if (from < floor) {
+      skip = floor - from;
+      if (skip >= s.filesize) { s.mapped = nullptr; continue; }
+      from = floor;
+    }
+    uint8_t* dst = reinterpret_cast<uint8_t*>(uintptr_t(from));
+    memcpy(dst, file_.data() + slice_ + s.fileoff + skip, s.filesize - skip);
     s.mapped = dst;
   }
   return true;

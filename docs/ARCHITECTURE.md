@@ -43,12 +43,11 @@ it is the only record of which instruction set a function is in.
 
 ## The slide has to be zero
 
-This is the sharpest constraint in the project and it was found by the
-whole-function harness rather than by reading, so it is written down here
-before it is solved.
+The sharpest constraint in the project, and the one that decided how the loader
+works. It was found by the whole-function harness rather than by reading.
 
 Canabalt's binary is `MH_EXECUTE`, **not** `MH_PIE`, and it carries no
-relocation information of any kind:
+relocation information at all:
 
 ```
   rebase     off 0x0        size 0
@@ -62,72 +61,72 @@ The bind tables are there, because imports still had to be resolved. The
 this era was linked at a fixed address and dyld never slid it. Nothing in the
 file records which words are pointers.
 
-So a pointer in `__DATA`, or a pointer sitting in a literal pool in `__TEXT`,
-is a bare link-time address like `0x00041a9c` with nothing marking it as one.
-An image mapped anywhere else cannot be corrected, because there is no list of
-what to correct. **The image has to be mapped at its own link address, and
-`image_base` has to equal the link base.**
+This is not a Canabalt quirk. Every armv6 title measured is the same -- Angry
+Birds Rio and Angry Birds Halloween do not carry `LC_DYLD_INFO` at all -- so no
+choice of target avoids it:
 
-`__TEXT` begins at `0x1000`. Windows will not allocate below `0x10000` -- the
-first 64 KB is the null-pointer partition and `VirtualAlloc` refuses it -- and
-Linux refuses below `vm.mmap_min_addr`, 64 KB by default. Both floors sit above
-the address this image needs.
+| | slice | PIE | rebase | local relocs |
+|---|---|---|---|---|
+| Canabalt | armv6 | no | 0 | 0 |
+| Angry Birds Rio | armv6 | no | absent | 0 |
+| Angry Birds Halloween | armv6 | no | absent | 0 |
 
-What this costs today is measurable: of 152 self-contained functions in
-Canabalt, 12 can be differentially tested. The other 140 dereference a
-link-absolute pointer, which in a slid harness is a wild read. It is not a
-harness defect -- it is the real constraint, showing up early.
+So a pointer in `__DATA`, or one sitting in a literal pool in `__TEXT`, is a
+bare link-time address like `0x00041a9c` with nothing marking it as one. An
+image mapped anywhere else cannot be corrected, because there is no list of
+what to correct. **The image has to be mapped at its own link address, and the
+slide has to be zero.**
 
-Three ways out, in increasing order of how much they give up:
+`__TEXT` begins at `0x1000`, and no desktop OS will hand that out: Windows
+reserves the first 64 KB as the null-pointer partition, and Linux's
+`vm.mmap_min_addr` defaults to the same. For a while that looked like a choice
+between requiring a patched host, guessing which words are pointers, or
+scanning `__DATA` for pointer-shaped words -- all three bad.
 
-1. **Map at the link address.** Exact, needs no inference, and needs a host
-   that permits a low mapping -- `vm.mmap_min_addr=0` on Linux. Correct
-   everywhere it works, and simply unavailable on Windows.
-2. **Fold literal-pool pointers at lift time.** The lifter already knows the
-   address of every `ldr rN, [pc, #k]` and can read the literal out of the
-   image while lifting. If the value lands inside the image's vm range it is
-   probably a pointer and can be emitted as `image_base + (v - link_base)`.
-   This narrows the guess from "every word in `__DATA`" to "the words the code
-   actually loads as constants", which is a far better place to guess -- but it
-   is still a guess, and the range `0x1000`-`0x67000` is 4,096 to 421,888,
-   which are entirely ordinary integers for a game to hold.
-3. **Scan `__DATA` for pointer-shaped words.** The classic heuristic, and the
-   worst of the three: the widest exposure to false positives and no
-   information about how a word is used.
+### The way out
 
-### What the measurement says
+It came from separating two things that had been treated as one:
 
-Taken, because it decides the design rather than merely informing it. Every
-literal-pool load in Canabalt, classified by where its value points:
+- **Folding a literal-pool *load* into a constant is exact.** `__TEXT` is
+  mapped r-x and no instruction in the image can write it, so the value at that
+  address is fixed at link time and the emitter can simply read it while
+  lifting. `ldr r0, [pc, #8]` becomes `ARC_W(c, 0, 0x41a9c)`.
+- **Adding the slide to that *value* is a guess.** Nothing says whether
+  `0x41a9c` is a pointer or an integer.
 
-| literal value lands in | n | |
-|---|---:|---:|
-| `__DATA` | 5,054 | 86.3% |
-| not an address at all | 723 | 12.4% |
-| `__TEXT` | 76 | 1.3% |
+Only the first is needed, and it makes the second unnecessary. Look at where
+the sections actually sit:
 
-And the functions line up exactly with the harness: of 152 self-contained
-functions, **139 load an address-shaped literal and 13 do not** -- against 12
-that pass the differential test today. The faulting functions are not a random
-140; they are precisely the ones that load a pointer out of a literal pool.
+| section | range | below the 64 KB floor? |
+|---|---|---|
+| `__TEXT,__text` | `0x2504`-`0x2fa30` | **yes, and only this one** |
+| `__TEXT,__cstring` | `0x2fa30`-`0x36158` | no |
+| `__TEXT,__const` | `0x36158`-`0x3a306` | no |
+| everything in `__DATA` | `0x3b000`-`0x4367c` | no |
 
-So option (2) is *necessary*, and it is much less of a guess than it looked:
-5,062 of the 5,130 address-shaped literals are `>= 0x10000`, too large to be a
-plausible ordinary constant. Only 68 sites are genuinely ambiguous, and those
-can be left unfolded and listed rather than guessed at.
+`__text` is the only section under `0x10000`, and it holds exactly two kinds of
+byte: instructions, which are never executed because the lifted C is executed
+instead, and literal pools, whose only readers are the loads just folded away.
+5,852 of Canabalt's 5,853 literal-pool loads fold.
 
-But it is **not sufficient**, and the measurement is what shows why. Folding
-literals fixes *reaching* `__DATA`. It does nothing for pointers stored
-*inside* `__DATA` -- vtables, the ObjC class list, string tables -- which are
-read at run time and are equally unrebased. Those need either a scan or the
-fact that several of those structures have a documented layout, which is a
-better lever than a heuristic and is the same one `objc_dump.py` already pulls.
+So nothing needs to be mapped below `0x10000`. The loader maps every segment at
+its link address from the floor upward, the slide is zero, and every absolute
+pointer in the file is correct because it was never moved. The OS's own refusal
+to map the first 64 KB becomes the low guard page for free: anything that does
+still read down there faults immediately instead of quietly reading a zero.
 
-The honest summary: **(1) is exact and costs a platform; (2) unblocks the
-emitter's own verification and is 98.7% unambiguous; (3) is unavoidable for
-pointers already in `__DATA` unless their structure is read rather than
-guessed.** That is a decision about what iparecomp is willing to require of a
-host, and it is not the emitter's to make.
+```
+link base  00001000, span 0.4 MB
+slide      00000000
+           __TEXT       00001000 +0x3a000  host 0000000000010000
+           __DATA       0003B000 +0x9000   host 000000000003b000
+           __LINKEDIT   00044000 +0x22970  host 0000000000044000
+```
+
+The measured effect on verification is the whole point: whole-function
+differential testing went from **12 of 152** self-contained functions to
+**150 of 152**, at 100% agreement. The 140 that used to fail were not
+mis-lifted. They were reading globals through pointers the harness had moved.
 
 ## The emitter
 

@@ -45,11 +45,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # already-generated program rather than re-emitting each body.
 EXTRA_HEADERS: list = []
 
-# Windows will not map the first 64 KB, and these images are linked at 0x1000,
-# so the image cannot go at its own address on this host. That is exactly what
-# `image_base` is for: both sides are told the same slid base and every
-# PC-derived constant follows it.
-IMAGE_BASE = 0x20000000
+# The image loads at its own link address, with no slide. That is not a
+# preference: these binaries are non-PIE with an empty rebase table, so an
+# absolute pointer in __DATA cannot be corrected and only a zero slide leaves
+# it right.
+#
+# It is possible because the lifter folds every literal-pool load into a
+# constant, and __TEXT,__text is the only section below the 64 KB floor. So
+# nothing needs to be mapped down there -- and the OS's own refusal to map the
+# first 64 KB becomes the low guard page for free.
+#
+# Set to the binary's link base at startup.
+IMAGE_BASE = 0x1000
+# The lowest address a desktop OS will hand out. Windows reserves the first
+# 64 KB as the null-pointer partition; Linux's vm.mmap_min_addr defaults to the
+# same. Anything the guest still reads below this is a bug worth a fault.
+IMAGE_FLOOR = 0x10000
 SCRATCH_BASE = 0x30000000
 SCRATCH_SIZE = 0x4000
 # Registers point at the middle, so an offset of either sign stays inside.
@@ -141,7 +152,9 @@ def build_driver(cases: list[Case], image: bytes, workdir: str,
                  .replace("@IMAGE_BASE@", hex(IMAGE_BASE))
                  .replace("@SCRATCH_BASE@", hex(SCRATCH_BASE))
                  .replace("@SCRATCH_SIZE@", hex(SCRATCH_SIZE))
-                 .replace("@IMAGE_SIZE@", hex(align_up(len(image)))))
+                 .replace("@IMAGE_FLOOR@", hex(IMAGE_FLOOR))
+                 .replace("@IMAGE_SPAN@",
+                          hex(align_up(IMAGE_BASE + len(image)) - IMAGE_FLOOR)))
     exe = os.path.join(workdir, "cases.exe")
     cc = os.environ.get("CC", "gcc")
     cmd = [cc, "-O1", "-std=c11", "-I", os.path.join(ROOT, "runtime")]
@@ -172,16 +185,17 @@ DRIVER_MAIN = r"""
    reserved-but-uncommitted ends are the guard. */
 #define ARC_GUARD 0x10000u
 
-static void* reserve(uintptr_t at, size_t size) {
+static void* reserve(uintptr_t at, size_t size, int guard_low) {
+  const size_t below = guard_low ? ARC_GUARD : 0;
 #ifdef _WIN32
-  char* base = (char*)VirtualAlloc((LPVOID)(at - ARC_GUARD),
-                                   size + 2 * ARC_GUARD, MEM_RESERVE,
+  char* base = (char*)VirtualAlloc((LPVOID)(at - below),
+                                   size + below + ARC_GUARD, MEM_RESERVE,
                                    PAGE_NOACCESS);
   if (!base) return NULL;
   void* p = VirtualAlloc((LPVOID)at, size, MEM_COMMIT, PAGE_READWRITE);
   return (p == (void*)at) ? p : NULL;
 #else
-  char* base = (char*)mmap((void*)(at - ARC_GUARD), size + 2 * ARC_GUARD,
+  char* base = (char*)mmap((void*)(at - below), size + below + ARC_GUARD,
                            PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
                            -1, 0);
   if (base == MAP_FAILED) return NULL;
@@ -200,22 +214,25 @@ int main(int argc, char** argv) {
   FILE* out = fopen(argv[2], "wb");
   if (!in || !out) { fprintf(stderr, "cannot open state files\n"); return 2; }
 
-  void* image = reserve(@IMAGE_BASE@, @IMAGE_SIZE@);
-  void* scratch = reserve(@SCRATCH_BASE@, @SCRATCH_SIZE@);
-  if (image != (void*)(uintptr_t)@IMAGE_BASE@ ||
+  /* The image gets no low guard because it cannot have one: the range below
+     it is the null-pointer partition, which is already unmappable and so
+     already faults. That is the guard, at no cost. */
+  void* image = reserve(@IMAGE_FLOOR@, @IMAGE_SPAN@, 0);
+  void* scratch = reserve(@SCRATCH_BASE@, @SCRATCH_SIZE@, 1);
+  if (image != (void*)(uintptr_t)@IMAGE_FLOOR@ ||
       scratch != (void*)(uintptr_t)@SCRATCH_BASE@) {
     fprintf(stderr, "could not map at the requested base\n");
     return 2;
   }
-  if (fread(image, 1, @IMAGE_SIZE@, in) == 0) return 2;
+  if (fread(image, 1, @IMAGE_SPAN@, in) == 0) return 2;
 
   /* Restore from pristine copies before every case. Lifted code writes to
      globals as well as to scratch, so without restoring the image too, each
      result depends on what ran before -- and changing the emitter then
      silently reshuffles which cases pass. */
-  unsigned char* clean_image = (unsigned char*)malloc(@IMAGE_SIZE@);
+  unsigned char* clean_image = (unsigned char*)malloc(@IMAGE_SPAN@);
   unsigned char* clean_scratch = (unsigned char*)malloc(@SCRATCH_SIZE@);
-  memcpy(clean_image, image, @IMAGE_SIZE@);
+  memcpy(clean_image, image, @IMAGE_SPAN@);
 
   Arm32Ctx c;
   jmp_buf recovery;
@@ -223,7 +240,7 @@ int main(int argc, char** argv) {
     if (fread(&c, sizeof c, 1, in) != 1) break;
     if (fread(clean_scratch, 1, @SCRATCH_SIZE@, in) != @SCRATCH_SIZE@) break;
     memcpy(scratch, clean_scratch, @SCRATCH_SIZE@);
-    memcpy(image, clean_image, @IMAGE_SIZE@);
+    memcpy(image, clean_image, @IMAGE_SPAN@);
     /* A guest trap is a result, not a crash: it means the lift reached
        something it could not express, and the case is reported rather than
        taking the rest of the run with it. */
@@ -323,6 +340,11 @@ def run_oracle(case: Case, regs, flags, vec, fpscr, scratch, image, image_size):
         mu.reg_write(uc.UC_ARM_REG_FPEXC, 0x40000000)
     except UcError:
         pass
+    # Unicorn is a virtual machine and has no low-address floor, so it maps
+    # the whole image at its link address -- including the part the host
+    # cannot. If the two ever disagree because of that, it is because
+    # something still reads __text at run time, which is exactly what wants
+    # finding.
     mu.mem_map(IMAGE_BASE, image_size, UC_PROT_ALL)
     mu.mem_write(IMAGE_BASE, image)
     mu.mem_map(SCRATCH_BASE, SCRATCH_SIZE, UC_PROT_ALL)
@@ -372,6 +394,8 @@ def main() -> None:
     LINK_BASE = link_base
     lf = L.Lifter()
     lf.link_base = link_base
+    _, lf.image = L.mapped_image(args.binary, args.slice)
+    lf.ro_range = L.read_only_span(args.binary, args.slice)
 
     cases = harvest(lf, code, text_addr, fns, args.per_form, args.form)
     if not cases:
@@ -384,8 +408,10 @@ def main() -> None:
     # loader would lay it out -- a function reaching a global
     # reads __DATA, and mapping only the code section reports
     # that as a wild pointer.
+    global IMAGE_BASE
+    IMAGE_BASE = link_base
     _, image_full = L.mapped_image(args.binary, args.slice)
-    image_size = align_up(len(image_full))
+    image_size = align_up(IMAGE_BASE + len(image_full)) - IMAGE_BASE
     image_full = image_full.ljust(image_size, b"\0")
 
     workdir = tempfile.mkdtemp(prefix="arcverify-")
@@ -415,7 +441,7 @@ def main() -> None:
     in_path = os.path.join(workdir, "in.bin")
     out_path = os.path.join(workdir, "out.bin")
     with open(in_path, "wb") as fh:
-        fh.write(image_full)
+        fh.write(image_full[IMAGE_FLOOR - IMAGE_BASE:])
         for (regs, flags, vec, fpscr, scratch) in states:
             fh.write(pack_ctx(regs, flags, vec, fpscr, ctx_size))
             fh.write(scratch)
