@@ -9,11 +9,13 @@
                                   │
                                   ├─▶ shim + ObjC runtime  ──┐
                                   │                          ├─▶ native executable
-                                  └─▶ decoder ──▶ emitter ───┘
+                                  └─▶ lifter.py ─────────────┘
+                                        │
+                                        └─▶ lift_verify.py ──▶ Unicorn
 ```
 
-Everything left of the emitter exists today. This document is mostly about what
-the emitter has to do, because that is the part with real decisions in it.
+Everything except the shim and the ObjC runtime exists today. This document is
+mostly about the emitter, because that is the part with real decisions in it.
 
 ## What the loader has to know that ELF did not
 
@@ -39,7 +41,50 @@ it is the only record of which instruction set a function is in.
 
 ## The emitter
 
-One C function per guest function, as in androidrecomp. Guest pointers are host
+### There is no decoder
+
+The obvious first milestone was a decoder for armv6, armv7 and Thumb-2,
+verified against capstone on real instructions. It was dropped before a line of
+it was written, because capstone already decodes all three: the milestone was
+to build a worse capstone and then test it against the real one.
+
+`lifter.py` emits straight from capstone's operand detail -- registers, shift
+kinds and amounts, memory bases and displacements, the condition field, the
+write-back flag -- exactly as androidrecomp's lifter does. Everything genuinely
+new about 32-bit ARM is *after* the decode, and that is where the effort went.
+
+The one thing this costs is that capstone's own view has to be understood
+rather than assumed. `lsl r0, r1, r2` comes back as two operands with the shift
+folded onto the source, not three with the amount separate; `vmrs` has a
+trailing `s` that is part of its name and not the flag-setting suffix. Both
+were found by the coverage report rather than by reading, which is the argument
+for having one.
+
+### Where a function ends, and where the data starts
+
+Function boundaries come from the symbol table, and a symbol-delimited function
+includes the literal pool sitting at its end. A pool disassembles perfectly
+into plausible nonsense -- a word of zeroes is `andeq r0, r0, r0`, which is why
+that is the fourth most common mnemonic in Canabalt and `muleq` the thirteenth.
+
+So the lifter walks reachability from the entry point and lifts only what it
+reaches. A pool sits past an unconditional terminator with nothing branching
+into it, so it is simply never reached, and no heuristic about what a word of
+zeroes means is required. Without this, data is reported as missing emitter
+coverage forever and the number never converges.
+
+### The number to watch is functions, not instructions
+
+A single unsupported instruction fails the whole function it sits in, so the
+two move very differently and only the first decides whether a build is
+possible. Canabalt went 80.8% -> 93.3% function completeness on one change that
+moved instruction coverage 88.4% -> 99.5%; the last 6.7 points of *functions*
+came from a form that was 0.5% of instructions but spread about one per
+function. `--report` therefore ranks by functions broken, not by occurrences.
+
+### One C function per guest function
+
+As in androidrecomp. Guest pointers are host
 pointers, so a guest load is a host dereference and there is no address
 translation layer. Beyond that, 32-bit ARM forces four decisions that ARM64
 never raised.
@@ -152,12 +197,44 @@ which is most of them.
 The emitter is checked the way androidrecomp checks its own: differentially,
 against an independent oracle, on real harvested instructions rather than
 synthetic ones. Unicorn provides the oracle and needs no armv6 hardware, which
-is fortunate, because there is none.
+is fortunate, because there is none. The independence is the whole point --
+checking the emitters against capstone would prove nothing, since capstone is
+where they get their operands.
 
-Per-instruction first, then whole functions with the image mapped at the same
-address on both sides. A lifted function that agrees with the emulator on
-registers, flags and memory for real inputs is correct in the only sense that
-matters.
+Per-instruction is done: 5,985 cases over 159 operand forms, comparing
+registers, flags, the vector file and memory, at 100% agreement. Whole
+functions are next, and cover the control flow the first harness excludes by
+construction.
+
+Three details of the harness are load-bearing, and two of them cost a run to
+learn:
+
+**The image goes at the same address on both sides, and that address is not its
+own.** These binaries are linked at 0x1000 and Windows will not map the first
+64 KB, so the image cannot go where it was linked. That is exactly what
+`image_base` is for: both sides are told the same slid base and every
+PC-derived constant follows it.
+
+**Reserve on the host's own granularity.** `VirtualAlloc` rounds a reservation
+base *down* to the 64 KB allocation granularity and succeeds, so asking for a
+one-page guard below a 64 KB-aligned address silently returns a region 60 KB
+lower than requested. Every guest address then reads real data from the wrong
+offset -- which looks exactly like an emitter bug, and cost an afternoon of
+reading correct emitters. The harness now checks that the mapping landed where
+it asked.
+
+**The oracle gates the test.** The lifted side runs in-process, so it is never
+handed a state Unicorn could not survive: if the oracle faults, the case is
+dropped rather than being allowed to take the run down. What the oracle cannot
+gate is a lifted instruction that computes a *different* address, which is the
+bug being hunted -- so results are flushed per case and the last one written
+names the instruction that faulted.
+
+The first thing this harness found was not an emitter bug at all: seeding FPSCR
+at random sets a rounding mode the generated C does not model, which shows up
+as a one-ULP disagreement on int-to-float. The emitter assumes the default
+rounding mode, which is what the ABI sets and what C's own conversions use.
+That assumption is now written down instead of accidentally true.
 
 ## The shim surface
 

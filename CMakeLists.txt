@@ -34,9 +34,11 @@ endif()
 
 find_package(SDL2 CONFIG QUIET)
 if(SDL2_FOUND)
-  target_link_libraries(iparecomp PUBLIC
-    $<TARGET_NAME_IF_EXISTS:SDL2::SDL2>
-    $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
+  # SDL2 only, never SDL2main: that library exists to rename an application's
+  # `main` to `SDL_main`, and iparecomp is a library whose hosts define their
+  # own entry point. Linking it drags in a WinMain that then cannot find the
+  # SDL_main it was written to call.
+  target_link_libraries(iparecomp PUBLIC $<TARGET_NAME_IF_EXISTS:SDL2::SDL2>)
   target_compile_definitions(iparecomp PUBLIC ARC_HAVE_SDL2)
   message(STATUS "iparecomp: SDL2 found -- window enabled")
 else()

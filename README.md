@@ -3,11 +3,12 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the loader and the triage tools work.** `ipa_host` parses a 32-bit
-ARM Mach-O, maps it, and prints an exact per-framework work list.
-`ipa_probe.py` triages a candidate in seconds, including the one check that
-decides everything. The emitter is the next milestone. See
-[Milestones](#milestones).
+**Status: the emitter works and is checked against an emulator.** All 626 of
+Canabalt's functions lift to C completely, the result compiles, and 5,985
+differential cases over 159 operand forms agree with Unicorn instruction for
+instruction. `ipa_probe.py` still triages a new candidate in seconds. What is
+missing is the runtime beneath the lifted code: the ObjC dispatch, the
+framework shims, and a window. See [Milestones](#milestones).
 
 ---
 
@@ -85,6 +86,8 @@ iparecomp is a lifting project from day one.
 | `tools/ipa_host.cpp` | Loads a binary and prints the outstanding-import work list, grouped by the framework that owes each symbol. |
 | `runtime/macho_image` | Parses a fat or thin Mach-O, picks an ARM slice, maps its segments, records the slide, and resolves every undefined symbol to the dylib that owes it. Refuses an encrypted image by name. |
 | `runtime/arm32_context.h` | Guest CPU state and the operations lifted code emits — the emitter's target. Barrel shifter with its separate carry-out, unpacked flags, condition predicates, interworking helpers. |
+| `tools/lifter.py` | Lifts armv6/armv7 and Thumb-2 to C, one C function per guest function. `--report` says what fraction of *functions* lift completely, which is the number that decides whether a build is possible. |
+| `tools/lift_verify.py` | Differential-tests lifted instructions against Unicorn on encodings harvested from the real binary, with the image mapped at the same address on both sides. |
 | `tools/objc_dump.py` | Reads the Objective-C class table straight out of `__DATA` -- classes, methods, selectors, and each method's implementation address. An iOS host contract is a set of classes, and this is how you discover one. |
 | `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
 
@@ -98,6 +101,15 @@ cmake --build build
 
 ./build/arc_selftest                       # ARM semantics, no .ipa needed
 ./build/ipa_host path/to/Payload/Game.app/Game
+```
+
+Lift a binary and check the result against an emulator:
+
+```sh
+pip install capstone unicorn
+python tools/lifter.py Game.ipa --report          # what still has no emitter
+python tools/lifter.py Game.ipa --out generated/  # the lifted program
+python tools/lift_verify.py Game.ipa              # against Unicorn
 ```
 
 On Windows add `-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake`
@@ -162,13 +174,20 @@ enough to lift in full and check against an emulator.
       recorded, imports resolved to owing frameworks.
 - [x] **M2 — the emitter's target.** `arm32_context.h`, with the shifter and
       flag semantics checked against hardware behaviour.
-- [ ] **M3 — decoder.** armv6/armv7 and Thumb-2 to an internal form, verified
-      against capstone on real harvested instructions.
-- [ ] **M4 — emitter.** That form to C, one function per unit. Condition codes
-      as predicates, PC reads folded to constants at lift time, `ldm`/`pop`
-      writing PC recognised as return or indirect branch.
-- [ ] **M5 — differential test.** Whole lifted functions against an emulator
-      with the image at the same address on both sides.
+- [x] ~~**M3 — decoder.**~~ **Dropped, deliberately.** This called for a
+      decoder for armv6/armv7 and Thumb-2, verified against capstone. But
+      capstone already decodes all three, so the milestone amounted to building
+      a worse capstone and then testing it against the real one. `lifter.py`
+      emits straight from capstone's operand detail, which is what
+      androidrecomp's lifter does and what freed the effort for the emitter.
+- [x] **M4 — emitter.** 626 of 626 functions, 41,167 of 41,167 instructions.
+      Condition codes as predicates, PC reads folded to constants at lift time,
+      `ldm`/`pop` writing PC recognised as return or indirect branch, and the
+      whole VFP surface these binaries use. The output compiles clean at
+      `-Wall`.
+- [ ] **M5 — differential test.** Per instruction: **done**, 5,985 cases over
+      159 operand forms, 100% agreement with Unicorn on registers, flags and
+      memory. Whole functions, which is what covers control flow: next.
 - [ ] **M6 — ObjC runtime.** Class realization from `__objc_classlist`,
       `objc_msgSend` by selector.
 - [ ] **M7 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,
