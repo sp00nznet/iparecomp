@@ -25,10 +25,12 @@ carries a library ordinal in the top byte of `n_desc`, indexing the
 is *known* to be owed by OpenGLES, not guessed from a name prefix the way the
 ELF side must. This is the one place iOS is kinder than Android.
 
-**Addresses are absolute.** These binaries were linked to load at a fixed
-address, and `__TEXT` vmaddr is meaningful. The loader records the slide
-between that and where it actually mapped, and the emitter expresses every
-PC-derived constant as `image_base + k`.
+**Addresses are absolute, and that is not a stylistic difference.** These
+binaries were linked to load at a fixed address, and `__TEXT` vmaddr is
+meaningful. The emitter expresses every PC-derived constant as `image_base + k`
+so that the generated code says what it depends on -- but see
+[The slide has to be zero](#the-slide-has-to-be-zero), which is the constraint
+that machinery cannot lift on its own.
 
 **`__TEXT` may be ciphertext.** Checked before anything else and reported as a
 first-class state, because it is the most common reason a candidate is not
@@ -38,6 +40,94 @@ viable and it is invisible otherwise — an encrypted binary parses perfectly.
 is the only boundary evidence, which puts real coverage at 80–92% rather than
 the 100% an `.eh_frame` gives, and makes the `N_ARM_THUMB_DEF` bit precious:
 it is the only record of which instruction set a function is in.
+
+## The slide has to be zero
+
+This is the sharpest constraint in the project and it was found by the
+whole-function harness rather than by reading, so it is written down here
+before it is solved.
+
+Canabalt's binary is `MH_EXECUTE`, **not** `MH_PIE`, and it carries no
+relocation information of any kind:
+
+```
+  rebase     off 0x0        size 0
+  bind       off 0x43000    size 2,852
+  lazy_bind  off 0x43b24    size 3,100
+  dysymtab: 0 external relocs, 0 local relocs
+```
+
+The bind tables are there, because imports still had to be resolved. The
+*rebase* table is empty, because it was never needed: a non-PIE executable of
+this era was linked at a fixed address and dyld never slid it. Nothing in the
+file records which words are pointers.
+
+So a pointer in `__DATA`, or a pointer sitting in a literal pool in `__TEXT`,
+is a bare link-time address like `0x00041a9c` with nothing marking it as one.
+An image mapped anywhere else cannot be corrected, because there is no list of
+what to correct. **The image has to be mapped at its own link address, and
+`image_base` has to equal the link base.**
+
+`__TEXT` begins at `0x1000`. Windows will not allocate below `0x10000` -- the
+first 64 KB is the null-pointer partition and `VirtualAlloc` refuses it -- and
+Linux refuses below `vm.mmap_min_addr`, 64 KB by default. Both floors sit above
+the address this image needs.
+
+What this costs today is measurable: of 152 self-contained functions in
+Canabalt, 12 can be differentially tested. The other 140 dereference a
+link-absolute pointer, which in a slid harness is a wild read. It is not a
+harness defect -- it is the real constraint, showing up early.
+
+Three ways out, in increasing order of how much they give up:
+
+1. **Map at the link address.** Exact, needs no inference, and needs a host
+   that permits a low mapping -- `vm.mmap_min_addr=0` on Linux. Correct
+   everywhere it works, and simply unavailable on Windows.
+2. **Fold literal-pool pointers at lift time.** The lifter already knows the
+   address of every `ldr rN, [pc, #k]` and can read the literal out of the
+   image while lifting. If the value lands inside the image's vm range it is
+   probably a pointer and can be emitted as `image_base + (v - link_base)`.
+   This narrows the guess from "every word in `__DATA`" to "the words the code
+   actually loads as constants", which is a far better place to guess -- but it
+   is still a guess, and the range `0x1000`-`0x67000` is 4,096 to 421,888,
+   which are entirely ordinary integers for a game to hold.
+3. **Scan `__DATA` for pointer-shaped words.** The classic heuristic, and the
+   worst of the three: the widest exposure to false positives and no
+   information about how a word is used.
+
+### What the measurement says
+
+Taken, because it decides the design rather than merely informing it. Every
+literal-pool load in Canabalt, classified by where its value points:
+
+| literal value lands in | n | |
+|---|---:|---:|
+| `__DATA` | 5,054 | 86.3% |
+| not an address at all | 723 | 12.4% |
+| `__TEXT` | 76 | 1.3% |
+
+And the functions line up exactly with the harness: of 152 self-contained
+functions, **139 load an address-shaped literal and 13 do not** -- against 12
+that pass the differential test today. The faulting functions are not a random
+140; they are precisely the ones that load a pointer out of a literal pool.
+
+So option (2) is *necessary*, and it is much less of a guess than it looked:
+5,062 of the 5,130 address-shaped literals are `>= 0x10000`, too large to be a
+plausible ordinary constant. Only 68 sites are genuinely ambiguous, and those
+can be left unfolded and listed rather than guessed at.
+
+But it is **not sufficient**, and the measurement is what shows why. Folding
+literals fixes *reaching* `__DATA`. It does nothing for pointers stored
+*inside* `__DATA` -- vtables, the ObjC class list, string tables -- which are
+read at run time and are equally unrebased. Those need either a scan or the
+fact that several of those structures have a documented layout, which is a
+better lever than a heuristic and is the same one `objc_dump.py` already pulls.
+
+The honest summary: **(1) is exact and costs a platform; (2) unblocks the
+emitter's own verification and is 98.7% unambiguous; (3) is unavoidable for
+pointers already in `__DATA` unless their structure is read rather than
+guessed.** That is a decision about what iparecomp is willing to require of a
+host, and it is not the emitter's to make.
 
 ## The emitter
 

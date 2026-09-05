@@ -981,6 +981,32 @@ class Lifter:
         return out, complete
 
 
+def mapped_image(path: str, want: str = "") -> tuple[int, bytes]:
+    """(link base, the image as the loader would lay it out).
+
+    Every segment with file content, at its own vmaddr, in one buffer -- not
+    just __text. A function reaching a global reads __DATA, and a harness that
+    maps only the code section reports that as a wild pointer.
+    """
+    _, data, _ = probe.read_app(path)
+    ms, _ = probe.slices(data)
+    m = ms[0]
+    if want:
+        for s in ms:
+            if probe.ARM_SUBTYPE.get(s.cpusubtype & 0xFF) == want:
+                m = s
+                break
+    segs = [s for s in m.segments if s[2] and s[0] != "__PAGEZERO"]
+    base = min(s[1] for s in segs)
+    span = max(s[1] + s[2] for s in segs) - base
+    out = bytearray(span)
+    for name, vmaddr, vmsize, fileoff, filesize, _ in segs:
+        if filesize:
+            out[vmaddr - base:vmaddr - base + filesize] = \
+                data[m.off + fileoff:m.off + fileoff + filesize]
+    return base, bytes(out)
+
+
 def load(path: str, want: str = ""):
     """(link_base, text_addr, text_bytes, functions) for one binary."""
     exe, data, _ = probe.read_app(path)

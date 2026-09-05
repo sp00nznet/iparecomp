@@ -185,14 +185,25 @@ enough to lift in full and check against an emulator.
       `ldm`/`pop` writing PC recognised as return or indirect branch, and the
       whole VFP surface these binaries use. The output compiles clean at
       `-Wall`.
-- [ ] **M5 — differential test.** Per instruction: **done**, 5,985 cases over
-      159 operand forms, 100% agreement with Unicorn on registers, flags and
-      memory. Whole functions, which is what covers control flow: next.
-- [ ] **M6 — ObjC runtime.** Class realization from `__objc_classlist`,
+- [x] **M5 — differential test.** Per instruction: 62,421 cases over 159
+      operand forms, 100% agreement with Unicorn on registers, flags, the
+      vector file and memory. Whole functions: 100% over the 12 of Canabalt's
+      152 self-contained functions that can be tested today -- the other 140
+      are blocked on M6, not on the emitter.
+- [ ] **M6 — the slide.** These binaries are non-PIE with an empty rebase
+      table, so nothing records which words are pointers, and the image cannot
+      be mapped anywhere but its link address -- which is below both Windows'
+      and Linux's floor. Measured: 139 of Canabalt's 152 self-contained
+      functions load a pointer out of a literal pool, and 5,062 of 5,130 such
+      literals are unambiguous. See
+      [The slide has to be zero](docs/ARCHITECTURE.md#the-slide-has-to-be-zero).
+      This gates every function that touches a global, so it comes before the
+      runtime.
+- [ ] **M7 — ObjC runtime.** Class realization from `__objc_classlist`,
       `objc_msgSend` by selector.
-- [ ] **M7 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,
+- [ ] **M8 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,
       CoreGraphics, OpenAL, AudioToolbox.
-- [ ] **M8 — a window.**
+- [ ] **M9 — a window.**
 
 ## Ports
 

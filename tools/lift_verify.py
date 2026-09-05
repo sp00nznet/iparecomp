@@ -41,6 +41,9 @@ except ImportError as e:
     sys.exit(f"need unicorn: pip install unicorn ({e})")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Filled in by the whole-function harness, which links the
+# already-generated program rather than re-emitting each body.
+EXTRA_HEADERS: list = []
 
 # Windows will not map the first 64 KB, and these images are linked at 0x1000,
 # so the image cannot go at its own address on this host. That is exactly what
@@ -109,7 +112,8 @@ CTX_FIELDS = 16 + 5           # r[16] then nf zf cf vf qf
 CTX_STRUCT = "<21I3x"
 
 
-def build_driver(cases: list[Case], image: bytes, workdir: str) -> str:
+def build_driver(cases: list[Case], image: bytes, workdir: str,
+                 extra_sources=(), extra_includes=()) -> str:
     """Compile every case into one program, run once per invocation.
 
     One process for the whole run rather than one per case: a lifted
@@ -120,7 +124,9 @@ def build_driver(cases: list[Case], image: bytes, workdir: str) -> str:
     src = os.path.join(workdir, "cases.c")
     with open(src, "w", encoding="utf-8") as fh:
         fh.write('#include "arm32_context.h"\n')
-        fh.write("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n")
+        for header in EXTRA_HEADERS:
+            fh.write(f'#include "{header}"\n')
+        fh.write("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <setjmp.h>\n")
         fh.write("#ifdef _WIN32\n#include <windows.h>\n#else\n"
                  "#include <sys/mman.h>\n#endif\n\n")
         for i, c in enumerate(cases):
@@ -138,8 +144,12 @@ def build_driver(cases: list[Case], image: bytes, workdir: str) -> str:
                  .replace("@IMAGE_SIZE@", hex(align_up(len(image)))))
     exe = os.path.join(workdir, "cases.exe")
     cc = os.environ.get("CC", "gcc")
-    cmd = [cc, "-O1", "-std=c11", "-I", os.path.join(ROOT, "runtime"),
-           src, os.path.join(ROOT, "runtime", "arm32_runtime.c"), "-o", exe]
+    cmd = [cc, "-O1", "-std=c11", "-I", os.path.join(ROOT, "runtime")]
+    for inc in extra_includes:
+        cmd += ["-I", inc]
+    cmd += [src, os.path.join(ROOT, "runtime", "arm32_runtime.c")]
+    cmd += list(extra_sources)
+    cmd += ["-o", exe]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"compiling the cases failed:\n{r.stderr[:4000]}")
@@ -199,16 +209,33 @@ int main(int argc, char** argv) {
   }
   if (fread(image, 1, @IMAGE_SIZE@, in) == 0) return 2;
 
+  /* Restore from pristine copies before every case. Lifted code writes to
+     globals as well as to scratch, so without restoring the image too, each
+     result depends on what ran before -- and changing the emitter then
+     silently reshuffles which cases pass. */
+  unsigned char* clean_image = (unsigned char*)malloc(@IMAGE_SIZE@);
+  unsigned char* clean_scratch = (unsigned char*)malloc(@SCRATCH_SIZE@);
+  memcpy(clean_image, image, @IMAGE_SIZE@);
+
   Arm32Ctx c;
-  unsigned char* pristine = (unsigned char*)malloc(@SCRATCH_SIZE@);
+  jmp_buf recovery;
   for (unsigned i = 0; i < @COUNT@; ++i) {
     if (fread(&c, sizeof c, 1, in) != 1) break;
-    if (fread(pristine, 1, @SCRATCH_SIZE@, in) != @SCRATCH_SIZE@) break;
-    /* Restore from a pristine copy before every case. Without it each result
-       depends on what ran before, and changing the emitter silently
-       reshuffles which cases pass. */
-    memcpy(scratch, pristine, @SCRATCH_SIZE@);
-    kCases[i](&c);
+    if (fread(clean_scratch, 1, @SCRATCH_SIZE@, in) != @SCRATCH_SIZE@) break;
+    memcpy(scratch, clean_scratch, @SCRATCH_SIZE@);
+    memcpy(image, clean_image, @IMAGE_SIZE@);
+    /* A guest trap is a result, not a crash: it means the lift reached
+       something it could not express, and the case is reported rather than
+       taking the rest of the run with it. */
+    uint32_t status = 0;
+    arc_set_recovery(&recovery);
+    if (setjmp(recovery) == 0) {
+      kCases[i](&c);
+    } else {
+      status = 1;
+    }
+    arc_set_recovery(0);
+    fwrite(&status, sizeof status, 1, out);
     fwrite(&c, sizeof c, 1, out);
     fwrite(scratch, 1, @SCRATCH_SIZE@, out);
     fflush(out);
@@ -353,13 +380,13 @@ def main() -> None:
     print(f"{exe_name}: {len(cases):,} encodings over {forms} forms, "
           f"{args.seeds} states each")
 
-    # The image both sides see. Only __text is needed -- a literal pool load
-    # reaches into it and nothing here reaches further.
-    image = code
-    image_size = align_up(len(code) + (text_addr - link_base))
-    image_full = bytearray(image_size)
-    image_full[text_addr - link_base:text_addr - link_base + len(code)] = code
-    image_full = bytes(image_full)
+    # Every mapped segment, at its own vmaddr, exactly as the
+    # loader would lay it out -- a function reaching a global
+    # reads __DATA, and mapping only the code section reports
+    # that as a wild pointer.
+    _, image_full = L.mapped_image(args.binary, args.slice)
+    image_size = align_up(len(image_full))
+    image_full = image_full.ljust(image_size, b"\0")
 
     workdir = tempfile.mkdtemp(prefix="arcverify-")
     trials = [(c, s) for c in cases for s in range(args.seeds)]
@@ -396,7 +423,7 @@ def main() -> None:
 
     with open(out_path, "rb") as fh:
         blob = fh.read()
-    stride = ctx_size + SCRATCH_SIZE
+    stride = 4 + ctx_size + SCRATCH_SIZE
     ran = len(blob) // stride
     if ran < len(live):
         print(f"\nthe lifted side stopped after {ran} of {len(live)} cases -- "
@@ -406,10 +433,11 @@ def main() -> None:
     examples: dict = {}
     for i in range(ran):
         got = blob[i * stride:(i + 1) * stride]
-        regs, flags, vec, _ = unpack_ctx(got[:ctx_size])
-        mem = got[ctx_size:]
+        status = struct.unpack_from("<I", got, 0)[0]
+        regs, flags, vec, _ = unpack_ctx(got[4:4 + ctx_size])
+        mem = got[4 + ctx_size:]
         exp_regs, exp_flags, exp_vec, exp_mem = expected[i]
-        why = None
+        why = "trapped in lifted code" if status else None
         for n in range(15):
             if regs[n] != exp_regs[n]:
                 why = f"r{n} = {regs[n]:#x}, expected {exp_regs[n]:#x}"
