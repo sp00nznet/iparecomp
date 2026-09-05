@@ -3,13 +3,15 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the game runs its own startup code.** All 626 of Canabalt's functions
+**Status: the game runs its whole launch path.** All 626 of Canabalt's functions
 lift to C; 62,421 per-instruction and 3,000 whole-function differential cases
 agree with Unicorn. The image maps at its own link address with a zero slide,
-`objc_msgSend` dispatches into lifted code, and the guest now boots as far as
-`-[FlxGame initWithState:orientation:]` before it needs a framework nobody has
-written yet. What is missing is that framework side -- Foundation, UIKit,
-CoreGraphics, OpenGLES -- and a window. See [Milestones](#milestones).
+`objc_msgSend` dispatches into lifted code, and the guest now runs from
+`_start` through `applicationDidFinishLaunching:` and the whole flixel setup to
+`exit(0)`. What it asks for on the way is measured, not guessed: one run names
+the 18 messages and 27 imports still outstanding, and they are now the window
+itself -- UIScreen, UIWindow, CADisplayLink, NSRunLoop -- plus OpenGLES and
+audio. See [Milestones](#milestones).
 
 ---
 
@@ -235,16 +237,24 @@ enough to lift in full and check against an emulator.
       - [x] `--run` starts the guest and says where it stopped, with a
             backtrace through lifted code and the trail of calls out.
       - [x] `--permissive` answers an unimplemented framework message with nil
-            and writes it down, so one run enumerates the contract instead of
-            one rebuild per selector.
+            and an unimplemented import with zero, writing both down, so one
+            run enumerates the whole contract instead of one rebuild per
+            symbol.
+      - [x] Foundation enough to launch: NSString with a format implementation,
+            NSNumber, NSDictionary, NSUserDefaults, NSBundle, NSURL.
+      - [x] A category on a framework class answers from lifted code --
+            `+[UIColor(HexColor) colorWithHexRed:...]` is the game's own.
       - [ ] Foundation, UIKit, CoreGraphics, OpenGLES on desktop GL, OpenAL,
             AudioToolbox.
 
-      Canabalt currently runs eight frames into its own code -- through
-      `applicationDidFinishLaunching:`, `preloadSounds`, `+[FlxGlobal
-      sharedFlxGlobal]` and into `-[FlxGame initWithState:orientation:]` --
-      and one permissive run names the twelve framework messages that carry it
-      that far.
+      Canabalt runs its whole launch path and calls `exit(0)`: through
+      `applicationDidFinishLaunching:`, the audio load loop, `-[FlxGame
+      initWithState:orientation:]`, `-[FlxGLView initWithFrame:]` and
+      `-[FlxGame switchState:]`. One permissive run names everything still
+      missing -- 18 messages and 27 imports -- and what it names now is the
+      window itself: `UIScreen mainScreen`, `UIWindow initWithFrame:`,
+      `CADisplayLink displayLinkWithTarget:selector:`, `NSRunLoop
+      currentRunLoop`.
 - [ ] **M9 — a window.**
 
 ## Ports

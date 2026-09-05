@@ -21,6 +21,7 @@ add_library(iparecomp STATIC
   runtime/shim_libsystem.cpp
   runtime/objc_host.cpp
   runtime/shim_foundation.cpp
+  runtime/shim_objects.cpp
   runtime/arc_boot.cpp
 )
 target_include_directories(iparecomp PUBLIC runtime)

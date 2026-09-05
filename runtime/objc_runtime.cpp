@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <set>
 
 namespace arc {
@@ -149,10 +150,33 @@ void ObjcRuntime::MergeCategories(const MachOImage& img) {
     const uint32_t c = r.U32(cat->addr + i * 4);
     if (!c) continue;
     const uint32_t target = r.U32(c + kCatClass);
-    // A category on a framework class -- NSString, NSArray -- has a zero here
-    // and a bind entry naming it. Those methods belong to a class this binary
-    // does not define, so they are recorded as owed rather than merged.
-    if (!target || !by_addr_.count(target)) continue;
+    // A category on a framework class -- NSString, NSArray, UIColor -- has a
+    // zero here and a bind entry naming it. The *methods* are still in this
+    // binary, so they are lifted code answering messages sent to a class the
+    // binary does not define. Attach them to the host class object.
+    if (!target || !by_addr_.count(target)) {
+      const std::string owner =
+          ClassNameOf(img.BoundSymbolAt(c + kCatClass));
+      if (owner.empty()) continue;
+      for (int pass = 0; pass < 2; ++pass) {
+        const uint32_t ml =
+            r.U32(c + (pass ? kCatClassMethods : kCatInstanceMethods));
+        if (!ml) continue;
+        uint32_t entsize = r.U32(ml), count = r.U32(ml + 4);
+        if (entsize < kMethodSize || entsize > 64 || count > 4096) {
+          entsize = kMethodSize;
+          if (count > 4096) count = 0;
+        }
+        for (uint32_t k = 0; k < count; ++k) {
+          const uint32_t e = ml + 8 + k * entsize;
+          const std::string sel = r.Str(r.U32(e));
+          const uint32_t imp = r.U32(e + 8);
+          if (!sel.empty() && imp)
+            HostGuestMethod(owner.c_str(), pass != 0, sel.c_str(), imp);
+        }
+      }
+      continue;
+    }
     for (int pass = 0; pass < 2; ++pass) {
       const uint32_t ml =
           r.U32(c + (pass ? kCatClassMethods : kCatInstanceMethods));
@@ -283,6 +307,24 @@ const char* SelName(uint32_t sel) {
   return reinterpret_cast<const char*>(uintptr_t(sel));
 }
 
+// The trail is far more use carrying the message than the fact that a message
+// happened: twenty lines of "objc_msgSend" say nothing, whereas the selectors
+// in order say exactly where the guest got to. The strings are kept alive in a
+// deque because the ring holds pointers, not copies.
+void NoteMessage(uint32_t cls, const char* selector) {
+  static std::deque<std::string> kept;
+  const ObjcClass* k = g_objc.ClassAt(cls);
+  const char* cn = k ? k->name.c_str() : HostClassName(cls);
+  std::string line = k && k->meta ? "+[" : "-[";
+  line += cn ? cn : "?";
+  line += " ";
+  line += selector ? selector : "?";
+  line += "]";
+  kept.push_back(line);
+  if (kept.size() > 256) kept.pop_front();
+  arc_trace_note(kept.back().c_str());
+}
+
 void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   // A message to nil is not an error: it evaluates to zero and that is load
   // bearing in real Objective-C, not a corner case.
@@ -291,6 +333,7 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     return;
   }
   const char* name = SelName(sel);
+  NoteMessage(cls, name);
   const uint32_t imp = g_objc.Lookup(cls, name);
   if (imp) {
     // Registers are already arranged as the guest left them: receiver in r0,
@@ -298,8 +341,12 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     arc_dispatch(c, imp);
     return;
   }
-  // Not in this binary, so a framework owes it. The host class the chain runs
-  // out at is named by the bind table, and its methods are C functions here.
+  // Not on the class itself, so a framework owes it -- but a category in this
+  // binary may still answer, and that is lifted code, so it goes first.
+  if (const uint32_t cat = LookupHostImp(cls, name)) {
+    arc_dispatch(c, cat);
+    return;
+  }
   if (const ArcCtxFn host = LookupHostMethod(cls, name)) {
     host(c);
     return;
@@ -356,10 +403,18 @@ void MsgSendSuper2(Arm32Ctx* c) {
   const uint32_t receiver = ARC_LD32(sup);
   const uint32_t cls = ARC_LD32(sup + 4);
   const ObjcClass* k = g_objc.ClassAt(cls);
+  uint32_t super = k ? k->superclass : 0;
+  if (k && !super) {
+    // The superclass is not in this binary, which is the ordinary case for
+    // `[super init]` -- almost every class here inherits NSObject directly.
+    // Zero would send the message to nothing, so step across to the host
+    // class the bind table named.
+    super = HostClassByName(k->external_super.c_str(), k->meta);
+  }
   // The receiver takes r0 back: the callee is an ordinary method and expects
   // the object, not the objc_super it was reached through.
   ARC_W(c, 0, receiver);
-  Send(c, receiver, k ? k->superclass : 0, ARC_R(c, 1));
+  Send(c, receiver, super, ARC_R(c, 1));
 }
 
 void MsgSendStret(Arm32Ctx* c) {

@@ -50,7 +50,12 @@ struct Import {
   // the data word an indirect call loads before branching. Both must resolve
   // to the same shim.
   uint32_t stub = 0;
-  uint32_t slot = 0;
+  // An import can have more than one pointer slot -- a lazy one and a
+  // non-lazy one -- and code reaches it through either. Recording only the
+  // first leaves the other holding zero, which is how `_start`'s tail call to
+  // `exit` branched to nothing after main had run to completion.
+  uint32_t slot = 0;             // the first, for reporting
+  std::vector<uint32_t> slots;   // every one, for binding
   void* bound = nullptr; // what the shim supplied, or null while outstanding
 };
 
@@ -107,6 +112,12 @@ class MachOImage {
   const std::string& BoundSymbolAt(uint32_t address) const;
 
   const Section* FindSection(const std::string& seg, const std::string& name) const;
+
+  // Give an import a guest address to be known by, for the ones the linker
+  // gave no stub. An import called only through its pointer slot has no code
+  // anywhere in the image, so there is no address to register a shim at until
+  // one is invented.
+  void SetImportStub(size_t index, uint32_t address);
 
   bool encrypted() const { return encrypted_; }
   uint32_t entry() const { return entry_; }

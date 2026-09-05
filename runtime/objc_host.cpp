@@ -22,6 +22,9 @@ struct HostClassInfo {
   uint32_t super = 0;
   bool meta = false;
   std::unordered_map<std::string, ArcCtxFn> methods;
+  // Methods that live in the lifted binary rather than here, which is what a
+  // category on a framework class produces.
+  std::unordered_map<std::string, uint32_t> guest_methods;
 };
 
 std::map<uint32_t, HostClassInfo>& Classes() {
@@ -94,26 +97,57 @@ void HostMethod(const char* cls, bool meta, const char* selector, ArcCtxFn fn) {
   Classes()[obj].methods[selector] = fn;
 }
 
+uint32_t HostClassByName(const char* name, bool meta) {
+  if (!name || !*name) return 0;
+  auto& index = meta ? MetaByName() : ByName();
+  auto it = index.find(name);
+  return it == index.end() ? 0 : it->second;
+}
+
 const char* HostClassName(uint32_t cls) {
   auto it = Classes().find(cls);
   return it == Classes().end() ? nullptr : it->second.name.c_str();
 }
 
+void HostGuestMethod(const char* cls, bool meta, const char* selector,
+                     uint32_t imp) {
+  HostClass(cls, std::string(cls) == "NSObject" ? nullptr : "NSObject");
+  const uint32_t obj = meta ? MetaByName()[cls] : ByName()[cls];
+  if (obj) Classes()[obj].guest_methods[selector] = imp;
+}
+
+namespace {
+
+// Where a lookup on `cls` should start among the host classes: `cls` itself if
+// it is one, otherwise the framework class the guest chain runs out at.
+uint32_t HostStart(uint32_t cls) {
+  if (Classes().count(cls)) return cls;
+  const ObjcClass* boundary = Objc().Boundary(cls);
+  if (!boundary || boundary->external_super.empty()) return 0;
+  auto& index = boundary->meta ? MetaByName() : ByName();
+  auto it = index.find(boundary->external_super);
+  return it == index.end() ? 0 : it->second;
+}
+
+}  // namespace
+
+uint32_t LookupHostImp(uint32_t cls, const char* selector) {
+  if (!selector) return 0;
+  uint32_t cursor = HostStart(cls);
+  int guard = 0;
+  while (cursor && guard++ < 32) {
+    auto it = Classes().find(cursor);
+    if (it == Classes().end()) return 0;
+    auto m = it->second.guest_methods.find(selector);
+    if (m != it->second.guest_methods.end()) return m->second;
+    cursor = it->second.super;
+  }
+  return 0;
+}
+
 ArcCtxFn LookupHostMethod(uint32_t cls, const char* selector) {
   if (!selector) return nullptr;
-  uint32_t cursor = cls;
-
-  // A guest class that runs out of superclass is asking a framework class to
-  // answer, and the bind table said which one. Step across to it.
-  if (!Classes().count(cursor)) {
-    const ObjcClass* boundary = Objc().Boundary(cls);
-    if (!boundary || boundary->external_super.empty()) return nullptr;
-    auto& index = boundary->meta ? MetaByName() : ByName();
-    auto it = index.find(boundary->external_super);
-    if (it == index.end()) return nullptr;
-    cursor = it->second;
-  }
-
+  uint32_t cursor = HostStart(cls);
   int guard = 0;
   while (cursor && guard++ < 32) {
     auto it = Classes().find(cursor);
@@ -140,6 +174,18 @@ uint32_t HostAllocInstance(uint32_t cls) {
   std::memset(reinterpret_cast<void*>(uintptr_t(obj)), 0, size);
   W(obj, cls);
   return obj;
+}
+
+size_t BindImportSlots(const MachOImage& img) {
+  size_t filled = 0;
+  for (const auto& im : img.imports()) {
+    if (!im.stub) continue;
+    for (const uint32_t slot : im.slots) {
+      W(slot, im.stub);
+      ++filled;
+    }
+  }
+  return filled;
 }
 
 size_t BindHostClasses(const MachOImage& img) {

@@ -1,0 +1,470 @@
+// The Foundation and UIKit objects the startup path asks for.
+//
+// None of this is a Foundation. Each one is the smallest thing that answers
+// what the game actually sends -- which is known, because a permissive run
+// lists it -- and no more. The point is to keep the guest moving so the next
+// requirement becomes visible; anything built ahead of that is guesswork.
+//
+// Where a shortcut is taken it is named. The ones here are: no reference
+// counting, no threading, and dictionaries keyed by string content rather than
+// by a real hash of an arbitrary object.
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "arc_mem.h"
+#include "arm32_context.h"
+#include "objc_host.h"
+#include "objc_runtime.h"
+
+namespace arc {
+namespace {
+
+std::string StringText(uint32_t obj);
+
+// --- boxed values ----------------------------------------------------------
+// An NSNumber is an isa and a double. Keeping one representation rather than
+// tagging by type means -intValue on something made with +numberWithFloat:
+// truncates, which is what the real one does.
+struct Boxed {
+  double value = 0;
+};
+
+std::map<uint32_t, Boxed>& Numbers() {
+  static std::map<uint32_t, Boxed> m;
+  return m;
+}
+
+// Where a shim keeps whatever a guest object needs beyond its isa. Keyed on
+// the guest address, so the object itself stays four bytes and the guest can
+// hold it in a register like any other.
+std::map<uint32_t, std::map<std::string, uint32_t>>& Fields() {
+  static std::map<uint32_t, std::map<std::string, uint32_t>> m;
+  return m;
+}
+
+float F32(uint32_t bits) {
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+
+uint32_t Bits(float f) {
+  uint32_t u;
+  std::memcpy(&u, &f, 4);
+  return u;
+}
+
+uint32_t MakeNumber(double v) {
+  const uint32_t obj = HostAllocInstance(HostClass("NSNumber", "NSObject"));
+  if (obj) Numbers()[obj] = {v};
+  return obj;
+}
+
+double NumberValue(uint32_t obj) {
+  auto it = Numbers().find(obj);
+  return it == Numbers().end() ? 0.0 : it->second.value;
+}
+
+void NumberWithInteger(Arm32Ctx* c) {
+  ARC_W(c, 0, MakeNumber(double(int32_t(ARC_R(c, 2)))));
+}
+void NumberWithBool(Arm32Ctx* c) {
+  ARC_W(c, 0, MakeNumber(ARC_R(c, 2) ? 1.0 : 0.0));
+}
+void NumberWithFloat(Arm32Ctx* c) {
+  ARC_W(c, 0, MakeNumber(double(F32(ARC_R(c, 2)))));
+}
+void IntValue(Arm32Ctx* c) {
+  ARC_W(c, 0, uint32_t(int32_t(NumberValue(ARC_R(c, 0)))));
+}
+void FloatValue(Arm32Ctx* c) {
+  ARC_W(c, 0, Bits(float(NumberValue(ARC_R(c, 0)))));
+}
+void BoolValue(Arm32Ctx* c) {
+  ARC_W(c, 0, NumberValue(ARC_R(c, 0)) != 0.0 ? 1 : 0);
+}
+
+// --- strings and keys ------------------------------------------------------
+// A key is either a CFConstantString the compiler emitted or something a shim
+// made. Both are read as text, and a dictionary keyed on the text is right
+// where pointer identity would not be: the same literal can appear more than
+// once in a binary.
+constexpr uint32_t kCFStringChars = 8;
+
+std::string KeyText(uint32_t obj) {
+  if (!obj) return std::string();
+  const std::string s = StringText(obj);
+  if (!s.empty()) return s;
+  // Not a string at all: key on identity, which is right for an object used
+  // as a token rather than as text.
+  char buf[24];
+  std::snprintf(buf, sizeof buf, "#%08x", obj);
+  return buf;
+}
+
+uint32_t Singleton(const char* name);
+
+// --- strings ---------------------------------------------------------------
+// A host string is given the same shape as a CFConstantString -- isa, flags,
+// bytes, length -- so that one reader handles both the literals the compiler
+// emitted and the strings a shim made. The characters live in guest memory
+// too, because the guest is entitled to take `-UTF8String` and pass it to
+// anything expecting a char*.
+std::map<uint32_t, std::string>& Strings() {
+  static std::map<uint32_t, std::string> m;
+  return m;
+}
+
+uint32_t MakeString(const std::string& text) {
+  const uint32_t obj = HostAllocInstance(HostClass("NSString", "NSObject"));
+  if (!obj) return 0;
+  const uint32_t chars = arc_guest_strdup(text.c_str());
+  ARC_ST32(obj + 8, chars);
+  ARC_ST32(obj + 12, uint32_t(text.size()));
+  Strings()[obj] = text;
+  return obj;
+}
+
+std::string StringText(uint32_t obj) {
+  if (!obj) return std::string();
+  auto it = Strings().find(obj);
+  if (it != Strings().end()) return it->second;
+  const uint32_t p = ARC_LD32(obj + kCFStringChars);
+  if (!p) return std::string();
+  return reinterpret_cast<const char*>(uintptr_t(p));
+}
+
+// The arguments after self and _cmd: r2 and r3, then the stack. Every variadic
+// shim needs the same walk, so it is done once.
+std::vector<uint32_t> VarArgs(Arm32Ctx* c, int first) {
+  std::vector<uint32_t> out;
+  for (int r = first; r <= 3; ++r) out.push_back(ARC_R(c, uint32_t(r)));
+  const uint32_t sp = ARC_SP(c);
+  for (int i = 0; i < 24 && arc_guest_owns(sp + i * 4, 4); ++i)
+    out.push_back(ARC_LD32(sp + i * 4));
+  return out;
+}
+
+// ponytail: enough of the format language to carry the strings this game
+// builds -- %@, %d/%i/%u, %f/%g with a width, %s, %c, %%. A double takes two
+// words under the soft-float ABI and is eight-aligned, which is the one part
+// that is easy to get quietly wrong. Anything unrecognised is copied through
+// verbatim rather than guessed at, so it shows up in the output instead of
+// being silently dropped.
+std::string FormatWith(const std::string& fmt, const std::vector<uint32_t>& a) {
+  std::string out;
+  size_t arg = 0;
+  for (size_t i = 0; i < fmt.size(); ++i) {
+    if (fmt[i] != '%') {
+      out += fmt[i];
+      continue;
+    }
+    size_t j = i + 1;
+    while (j < fmt.size() && !std::strchr("@diufgGsc%xX", fmt[j])) ++j;
+    if (j >= fmt.size()) {
+      out += fmt.substr(i);
+      break;
+    }
+    const char conv = fmt[j];
+    const std::string spec = fmt.substr(i, j - i + 1);
+    char buf[256];
+    if (conv == '%') {
+      out += '%';
+    } else if (conv == '@') {
+      out += arg < a.size() ? StringText(a[arg++]) : std::string("(null)");
+    } else if (conv == 's') {
+      const uint32_t p = arg < a.size() ? a[arg++] : 0;
+      out += p ? reinterpret_cast<const char*>(uintptr_t(p)) : "(null)";
+    } else if (conv == 'f' || conv == 'g' || conv == 'G') {
+      // Eight-aligned, and two words wide.
+      if (arg % 2) ++arg;
+      uint64_t bits = 0;
+      if (arg + 1 < a.size()) bits = uint64_t(a[arg]) | (uint64_t(a[arg + 1]) << 32);
+      arg += 2;
+      double d;
+      std::memcpy(&d, &bits, 8);
+      std::snprintf(buf, sizeof buf, spec.c_str(), d);
+      out += buf;
+    } else {
+      const uint32_t v = arg < a.size() ? a[arg++] : 0;
+      std::snprintf(buf, sizeof buf, spec.c_str(), v);
+      out += buf;
+    }
+    i = j;
+  }
+  return out;
+}
+
+void StringWithString(Arm32Ctx* c) {
+  ARC_W(c, 0, MakeString(StringText(ARC_R(c, 2))));
+}
+
+void StringWithUTF8String(Arm32Ctx* c) {
+  const uint32_t p = ARC_R(c, 2);
+  ARC_W(c, 0, MakeString(p ? reinterpret_cast<const char*>(uintptr_t(p)) : ""));
+}
+
+void StringWithFormat(Arm32Ctx* c) {
+  const std::string fmt = StringText(ARC_R(c, 2));
+  ARC_W(c, 0, MakeString(FormatWith(fmt, VarArgs(c, 3))));
+}
+
+void UTF8String(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0);
+  auto it = Strings().find(self);
+  if (it != Strings().end()) {
+    ARC_W(c, 0, ARC_LD32(self + 8));
+    return;
+  }
+  ARC_W(c, 0, ARC_LD32(self + kCFStringChars));
+}
+
+void StringLength(Arm32Ctx* c) {
+  ARC_W(c, 0, uint32_t(StringText(ARC_R(c, 0)).size()));
+}
+
+void IsEqualToString(Arm32Ctx* c) {
+  ARC_W(c, 0, StringText(ARC_R(c, 0)) == StringText(ARC_R(c, 2)) ? 1 : 0);
+}
+
+// A localized string with no table falls back to the key, which is what the
+// real one does when the lookup misses.
+void LocalizedStringForKey(Arm32Ctx* c) {
+  ARC_W(c, 0, MakeString(StringText(ARC_R(c, 2))));
+}
+
+// Reading a URL is how this game reaches Twitter. There is no network here and
+// there does not need to be: nil is what an offline device returns, and the
+// game already handles it.
+void NilMethod(Arm32Ctx* c) { ARC_W(c, 0, 0); }
+
+void URLWithString(Arm32Ctx* c) {
+  const uint32_t obj = HostAllocInstance(HostClass("NSURL", "NSObject"));
+  if (obj) Strings()[obj] = StringText(ARC_R(c, 2));
+  ARC_W(c, 0, obj);
+}
+
+void CurrentDevice(Arm32Ctx* c) {
+  ARC_W(c, 0, Singleton("UIDevice"));
+}
+
+// --- dictionaries ----------------------------------------------------------
+std::map<uint32_t, std::map<std::string, uint32_t>>& Dicts() {
+  static std::map<uint32_t, std::map<std::string, uint32_t>> m;
+  return m;
+}
+
+uint32_t MakeDict(const char* cls) {
+  const uint32_t obj = HostAllocInstance(HostClass(cls, "NSObject"));
+  if (obj) Dicts()[obj];
+  return obj;
+}
+
+// +dictionaryWithObjectsAndKeys: is variadic and nil-terminated. Under AAPCS
+// the first two arguments after self and _cmd are in r2 and r3 and the rest
+// are on the stack, which is why this reads both.
+void DictionaryWithObjectsAndKeys(Arm32Ctx* c) {
+  const uint32_t obj = MakeDict("NSDictionary");
+  if (!obj) return;
+  auto& d = Dicts()[obj];
+  std::vector<uint32_t> args{ARC_R(c, 2), ARC_R(c, 3)};
+  const uint32_t sp = ARC_SP(c);
+  for (int i = 0; i < 16 && arc_guest_owns(sp + i * 4, 4); ++i)
+    args.push_back(ARC_LD32(sp + i * 4));
+  for (size_t i = 0; i + 1 < args.size(); i += 2) {
+    if (!args[i]) break;  // the nil terminator
+    d[KeyText(args[i + 1])] = args[i];
+  }
+  ARC_W(c, 0, obj);
+}
+
+void ObjectForKey(Arm32Ctx* c) {
+  auto it = Dicts().find(ARC_R(c, 0));
+  if (it == Dicts().end()) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  auto v = it->second.find(KeyText(ARC_R(c, 2)));
+  ARC_W(c, 0, v == it->second.end() ? 0 : v->second);
+}
+
+void SetObjectForKey(Arm32Ctx* c) {
+  Dicts()[ARC_R(c, 0)][KeyText(ARC_R(c, 3))] = ARC_R(c, 2);
+  ARC_W(c, 0, 0);
+}
+
+// --- singletons ------------------------------------------------------------
+uint32_t Singleton(const char* name) {
+  static std::map<std::string, uint32_t> made;
+  auto it = made.find(name);
+  if (it != made.end()) return it->second;
+  const uint32_t obj = MakeDict(name);
+  made[name] = obj;
+  return obj;
+}
+
+void StandardUserDefaults(Arm32Ctx* c) {
+  ARC_W(c, 0, Singleton("NSUserDefaults"));
+}
+void MainBundle(Arm32Ctx* c) { ARC_W(c, 0, Singleton("NSBundle")); }
+void Synchronize(Arm32Ctx* c) { ARC_W(c, 0, 1); }
+
+// A default that was never written reads as zero, which for -integerForKey:
+// and -floatForKey: is the documented answer rather than a stand-in.
+void IntegerForKey(Arm32Ctx* c) {
+  auto& d = Dicts()[ARC_R(c, 0)];
+  auto v = d.find(KeyText(ARC_R(c, 2)));
+  ARC_W(c, 0, v == d.end() ? 0 : uint32_t(int32_t(NumberValue(v->second))));
+}
+
+void FloatForKey(Arm32Ctx* c) {
+  auto& d = Dicts()[ARC_R(c, 0)];
+  auto v = d.find(KeyText(ARC_R(c, 2)));
+  ARC_W(c, 0, v == d.end() ? 0 : Bits(float(NumberValue(v->second))));
+}
+
+// --- UIColor ---------------------------------------------------------------
+void ColorWithRGBA(Arm32Ctx* c) {
+  // Four floats under the soft-float ABI: r2, r3, then the stack.
+  const uint32_t obj = HostAllocInstance(HostClass("UIColor", "NSObject"));
+  if (!obj) return;
+  auto& f = Fields()[obj];
+  f["r"] = ARC_R(c, 2);
+  f["g"] = ARC_R(c, 3);
+  const uint32_t sp = ARC_SP(c);
+  f["b"] = arc_guest_owns(sp, 4) ? ARC_LD32(sp) : 0;
+  f["a"] = arc_guest_owns(sp + 4, 4) ? ARC_LD32(sp + 4) : Bits(1.0f);
+  ARC_W(c, 0, obj);
+}
+
+// --- operations ------------------------------------------------------------
+// An operation is queued, not run. That is not a shortcut -- it is the
+// difference between matching the real semantics and not.
+//
+// Running it inline was the first attempt and it was wrong in a way worth
+// recording: NSOperationQueue is asynchronous, so Canabalt's `backgroundTask`
+// -- keychain, Twitter, the network -- ran *before* the launch path continued,
+// and a peripheral path ended up blocking the critical one. Queueing it puts
+// the order back: the main thread carries on, and the queue is drained when
+// there is a run loop to drain it from.
+void InitWithTargetSelectorObject(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0);
+  auto& f = Fields()[self];
+  f["target"] = ARC_R(c, 2);
+  f["selector"] = ARC_R(c, 3);
+  const uint32_t sp = ARC_SP(c);
+  f["object"] = arc_guest_owns(sp, 4) ? ARC_LD32(sp) : 0;
+  ARC_W(c, 0, self);
+}
+
+std::vector<uint32_t>& Queued() {
+  static std::vector<uint32_t> q;
+  return q;
+}
+
+void AddOperation(Arm32Ctx* c) {
+  Queued().push_back(ARC_R(c, 2));
+  ARC_W(c, 0, 0);
+}
+
+void Nop(Arm32Ctx* c) { ARC_W(c, 0, 0); }
+
+struct Entry {
+  const char* cls;
+  bool meta;
+  const char* sel;
+  ArcCtxFn fn;
+};
+
+const Entry kEntries[] = {
+    {"NSNumber", true, "numberWithInteger:", NumberWithInteger},
+    {"NSNumber", true, "numberWithInt:", NumberWithInteger},
+    {"NSNumber", true, "numberWithBool:", NumberWithBool},
+    {"NSNumber", true, "numberWithFloat:", NumberWithFloat},
+    {"NSNumber", false, "intValue", IntValue},
+    {"NSNumber", false, "integerValue", IntValue},
+    {"NSNumber", false, "floatValue", FloatValue},
+    {"NSNumber", false, "boolValue", BoolValue},
+
+    {"NSDictionary", true, "dictionaryWithObjectsAndKeys:",
+     DictionaryWithObjectsAndKeys},
+    {"NSDictionary", false, "objectForKey:", ObjectForKey},
+    {"NSMutableDictionary", false, "objectForKey:", ObjectForKey},
+    {"NSMutableDictionary", false, "setObject:forKey:", SetObjectForKey},
+
+    {"NSUserDefaults", true, "standardUserDefaults", StandardUserDefaults},
+    {"NSUserDefaults", false, "objectForKey:", ObjectForKey},
+    {"NSUserDefaults", false, "setObject:forKey:", SetObjectForKey},
+    {"NSUserDefaults", false, "integerForKey:", IntegerForKey},
+    {"NSUserDefaults", false, "floatForKey:", FloatForKey},
+    {"NSUserDefaults", false, "synchronize", Synchronize},
+
+    {"NSBundle", true, "mainBundle", MainBundle},
+
+    {"UIColor", true, "colorWithRed:green:blue:alpha:", ColorWithRGBA},
+
+    {"NSInvocationOperation", false, "initWithTarget:selector:object:",
+     InitWithTargetSelectorObject},
+    {"NSOperationQueue", false, "addOperation:", AddOperation},
+
+    {"UIApplication", false, "setStatusBarOrientation:animated:", Nop},
+    {"UIApplication", true, "sharedApplication", Nop},
+
+    {"NSString", true, "stringWithString:", StringWithString},
+    {"NSString", true, "stringWithUTF8String:", StringWithUTF8String},
+    {"NSString", true, "stringWithFormat:", StringWithFormat},
+    {"NSString", true, "stringWithContentsOfURL:encoding:error:", NilMethod},
+    {"NSString", false, "UTF8String", UTF8String},
+    {"NSString", false, "length", StringLength},
+    {"NSString", false, "isEqualToString:", IsEqualToString},
+    {"NSMutableString", true, "stringWithFormat:", StringWithFormat},
+
+    {"NSURL", true, "URLWithString:", URLWithString},
+    {"UIDevice", true, "currentDevice", CurrentDevice},
+
+    {"NSBundle", false, "localizedStringForKey:value:table:",
+     LocalizedStringForKey},
+    {"NSBundle", false, "infoDictionary", ObjectForKey},
+    {"NSUserDefaults", false, "registerDefaults:", Nop},
+    {"UIColor", false, "CGColor", NilMethod},
+};
+
+// Run everything queued. Nothing calls this yet -- it wants a run loop, which
+// wants a window -- but the operations are kept rather than dropped so that
+// turning it on later is one call and not a rewrite.
+size_t DrainOperations(Arm32Ctx* c) {
+  size_t ran = 0;
+  std::vector<uint32_t> batch;
+  batch.swap(Queued());
+  for (const uint32_t op : batch) {
+    auto it = Fields().find(op);
+    if (it == Fields().end()) continue;
+    const uint32_t target = it->second["target"];
+    const uint32_t sel = it->second["selector"];
+    if (!target || !sel) continue;
+    ARC_W(c, 0, target);
+    ARC_W(c, 1, sel);
+    ARC_W(c, 2, it->second["object"]);
+    const char* name = reinterpret_cast<const char*>(uintptr_t(sel));
+    if (const uint32_t imp = Objc().Lookup(ARC_LD32(target), name)) {
+      arc_dispatch(c, imp);
+      ++ran;
+    }
+  }
+  return ran;
+}
+
+}  // namespace
+
+void InstallObjectShims() {
+  for (const auto& e : kEntries) {
+    HostClass(e.cls, "NSObject");
+    HostMethod(e.cls, e.meta, e.sel, e.fn);
+  }
+}
+
+}  // namespace arc

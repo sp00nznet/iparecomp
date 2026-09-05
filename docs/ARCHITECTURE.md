@@ -435,6 +435,43 @@ That backtrace is the reason the lifter emits a frame note per function under
 and never the code that touched it, and the host stack is 626 identically
 shaped C functions; without the ring there is nothing to read.
 
+### Three ways an import is reached, and all of them have to work
+
+Getting the launch path to run end to end came down to this, and each part
+failed differently.
+
+**A `bl` goes to the stub.** That was wired first and it is the obvious one.
+
+**A PIC call loads a pointer slot and branches to what it holds.** Nothing
+filled those, so they held zero. What goes in is the *stub's own address*, not
+the shim: a guest address is 32 bits and a host function pointer is not, so the
+slot can never hold the implementation. Branching to the stub arrives at the
+same native table the direct call uses.
+
+**And an import can have more than one slot.** A lazy one and a non-lazy one,
+reached by different code. Recording only the first left the other at zero.
+
+**Some imports have no stub at all.** `exit` is only ever reached through its
+pointer, so the linker emitted no code for it anywhere -- and with no address
+to register a shim against, it stayed unreachable. Each of those gets an
+invented address in the guest heap, which gives every import one identity that
+a shim, the native table and a pointer slot can all agree on.
+
+The symptom of the last two was the same and it was a good one: the guest ran
+`main` to completion, returned, and then branched to nothing. `_start` calls
+`main` and tail-calls `exit`.
+
+### `[super init]` leaves the binary
+
+Almost every class here inherits `NSObject` directly, so `[super init]` --
+which is in every one of them -- immediately asks for a class the binary does
+not contain. `objc_msgSendSuper2` reads the superclass out of the class it was
+given, finds zero, and without help sends the message to nothing.
+
+Zero is not "no superclass". It is the same unbound field the class graph has
+everywhere else, and the bind table names it. Crossing to the host class object
+there is what took the run from stopping in `-[FlxGlobal init]` to finishing.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the

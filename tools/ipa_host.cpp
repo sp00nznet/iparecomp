@@ -241,12 +241,19 @@ int main(int argc, char** argv) {
     const arc::BootResult r = arc::Boot(img, ArcInstallLifted(), permissive);
     std::printf("\nshims      %zu imports claimed, %zu still owed\n", r.shims,
                 r.outstanding);
-    std::printf("classrefs  %zu framework class references bound\n",
-                r.bound_classes);
+    std::printf("classrefs  %zu bound, %zu pointer slots filled, "
+                "%zu imports given a synthetic address\n",
+                r.bound_classes, r.bound_slots, r.synthetic);
     std::printf("entry      %#010x\n", r.entry);
     if (!r.started) {
       std::printf("did not start: %s\n", r.trap.c_str());
       return 1;
+    }
+    if (r.exited) {
+      std::printf("\nthe guest ran its launch path and called exit(%d)\n",
+                  r.exit_code);
+      arc::ReportTrail(img);
+      return 0;
     }
     if (r.trapped) {
       std::printf("\nstopped: %s\n", r.trap.c_str());

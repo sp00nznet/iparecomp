@@ -172,6 +172,25 @@ void arc_register_stub(uint32_t address, const char* name, const char* owner) {
   ++g_stub_count;
 }
 
+static int g_permissive;
+// Which named imports were answered with zero, in the order first seen. The
+// names are the ones registered with the stub, so they stay alive.
+#define ARC_MAX_MISSING 512
+static const char* g_missing[ARC_MAX_MISSING];
+static size_t g_missing_count;
+
+void arc_set_permissive(int on) { g_permissive = on; }
+size_t arc_missing_count(void) { return g_missing_count; }
+const char* arc_missing_at(size_t i) {
+  return i < g_missing_count ? g_missing[i] : 0;
+}
+
+static void arc_note_missing(const char* name) {
+  for (size_t i = 0; i < g_missing_count; ++i)
+    if (g_missing[i] == name) return;
+  if (g_missing_count < ARC_MAX_MISSING) g_missing[g_missing_count++] = name;
+}
+
 static ArcDispatchFn g_dispatch;
 
 void arc_set_dispatch(ArcDispatchFn fn) { g_dispatch = fn; }
@@ -222,6 +241,14 @@ void arc_dispatch_miss(Arm32Ctx* c, uint32_t target) {
   for (size_t i = 0; i < g_stub_count; ++i) {
     if (g_stubs[i].address != addr) continue;
     arc_trace_note(g_stubs[i].name);
+    if (g_permissive) {
+      /* Zero, and written down. Most of these return a status the caller
+         checks or a pointer it tests, so zero carries a surprising distance --
+         and where it does not, that is worth learning in the same run. */
+      arc_note_missing(g_stubs[i].name);
+      c->r[0] = 0;
+      return;
+    }
     snprintf(msg, sizeof(msg), "%s is not implemented -- %s owes it",
              g_stubs[i].name, g_stubs[i].owner);
     arc_trap(c, msg);

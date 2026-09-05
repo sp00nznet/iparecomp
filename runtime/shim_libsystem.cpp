@@ -53,10 +53,20 @@ uint32_t ShimArc4Random(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
   return state;
 }
 
+int g_exit_code = 0;
+bool g_exited = false;
+
+// The guest exiting is a result, not a reason to end the process. Calling
+// std::exit here would take the report down with it -- the trail, the heap
+// figure, the list of messages nobody answered -- which is exactly what a run
+// is for. So it unwinds to the recovery point instead, and Boot decides what
+// to say about it.
 uint32_t ShimExit(uint32_t code, uint32_t, uint32_t, uint32_t, uint32_t,
                   uint32_t, uint32_t, uint32_t) {
-  std::printf("\nguest called exit(%d)\n", int(code));
-  std::exit(int(code));
+  g_exit_code = int(code);
+  g_exited = true;
+  arc_trap(nullptr, "the guest called exit");
+  return 0;
 }
 
 // --- the ones whose arguments are not where C would put them ---------------
@@ -143,6 +153,11 @@ const CtxShim kCtx[] = {
 };
 
 }  // namespace
+
+bool GuestExited(int* code) {
+  if (code) *code = g_exit_code;
+  return g_exited;
+}
 
 // Registers everything this file answers, at the stub address the guest
 // branches to. Returns how many imports it claimed.

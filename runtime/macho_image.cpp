@@ -315,9 +315,13 @@ bool MachOImage::Load(const std::string& path, const std::string& want_arch) {
           const std::string nm(strs + strx, strnlen(strs + strx, strsize - strx));
           auto it = by_name.find(nm);
           if (it == by_name.end()) continue;
-          if (is_stub) imports_[it->second].stub = sec.addr + k * stride;
-          else if (!imports_[it->second].slot)
-            imports_[it->second].slot = sec.addr + k * stride;
+          const uint32_t at = sec.addr + k * stride;
+          if (is_stub) {
+            imports_[it->second].stub = at;
+          } else {
+            if (!imports_[it->second].slot) imports_[it->second].slot = at;
+            imports_[it->second].slots.push_back(at);
+          }
         }
       }
     }
@@ -507,6 +511,10 @@ bool MachOImage::Map() {
     s.mapped = dst;
   }
   return true;
+}
+
+void MachOImage::SetImportStub(size_t index, uint32_t address) {
+  if (index < imports_.size()) imports_[index].stub = address;
 }
 
 void MachOImage::Bind(const std::string& symbol, void* addr) {

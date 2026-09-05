@@ -15,6 +15,8 @@ namespace arc {
 
 size_t InstallLibSystemShims(const MachOImage& img);
 size_t InstallUIKitShims(const MachOImage& img);
+bool GuestExited(int* code);
+void InstallObjectShims();
 
 namespace {
 
@@ -52,13 +54,29 @@ const char* NameOf(const MachOImage& img, uint32_t addr) {
 
 }  // namespace
 
-BootResult Boot(const MachOImage& img, void (*install_lifted)(uint32_t),
+BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
                 bool permissive) {
   BootResult r;
   SetPermissive(permissive);
+  arc_set_permissive(permissive ? 1 : 0);
   if (!arc_mem_init()) {
     r.trap = "could not reserve the guest's address space below 4 GB";
     return r;
+  }
+
+  // Not every import has a stub. `exit` is reached only through its pointer
+  // slot, so the linker emitted no code for it anywhere -- and with nothing to
+  // register a shim against, the slot stayed zero and `_start`'s tail call to
+  // it branched to nothing, after main had run to completion. Inventing an
+  // address in the guest heap gives every import one identity that a shim, the
+  // native table and a pointer slot can all agree on.
+  for (size_t i = 0; i < img.imports().size(); ++i) {
+    const Import& im = img.imports()[i];
+    if (im.stub || im.slots.empty()) continue;
+    if (const uint32_t at = arc_guest_alloc(4, 4)) {
+      img.SetImportStub(i, at);
+      ++r.synthetic;
+    }
   }
 
   r.shims = InstallLibSystemShims(img);
@@ -69,7 +87,9 @@ BootResult Boot(const MachOImage& img, void (*install_lifted)(uint32_t),
   // with zero rather than refused -- so the failure would surface much later
   // and somewhere unrelated.
   InstallFoundationClasses();
+  InstallObjectShims();
   r.bound_classes = BindHostClasses(img);
+  r.bound_slots = BindImportSlots(img);
   if (install_lifted) install_lifted(img.link_base());
 
   // Everything with a stub and no shim gets registered by name, so reaching
@@ -110,6 +130,8 @@ BootResult Boot(const MachOImage& img, void (*install_lifted)(uint32_t),
   r.started = true;
   if (setjmp(recovery) == 0) {
     arc_dispatch(&ctx, r.entry);
+  } else if (GuestExited(&r.exit_code)) {
+    r.exited = true;
   } else {
     r.trapped = true;
     r.trap = arc_last_trap();
@@ -139,6 +161,14 @@ void ReportTrail(const MachOImage& img) {
     std::printf(
         "\nno guest frames recorded -- build the lifted program with\n"
         "ARC_FRAMES defined to get a backtrace through it.\n");
+  }
+
+  const size_t unbound = arc_missing_count();
+  if (unbound) {
+    std::printf("\nimports answered with zero because nothing implements them "
+                "(%zu):\n", unbound);
+    for (size_t i = 0; i < unbound; ++i)
+      std::printf("  %s\n", arc_missing_at(i));
   }
 
   const size_t calls = arc_trace_count();

@@ -376,6 +376,14 @@ void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn);
 // is simply work, and the two want telling apart at a glance.
 void arc_register_stub(uint32_t address, const char* name, const char* owner);
 
+// Answer an unimplemented import with zero and record it, rather than
+// stopping. The same measuring instrument the Objective-C side has: one run
+// then names every missing import as well as every missing message, instead of
+// one rebuild per symbol.
+void arc_set_permissive(int on);
+size_t arc_missing_count(void);
+const char* arc_missing_at(size_t i);
+
 // Interworking. `bx`/`blx` select the instruction set from the low bit of the
 // target, so the dispatcher must mask it off to find the function and must not
 // lose it -- a Thumb function lifted as ARM decodes as garbage. The lifted
