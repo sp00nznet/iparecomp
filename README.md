@@ -3,13 +3,14 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the emitter works, and the game loads where it has to.** All 626 of
-Canabalt's functions lift to C completely and the result compiles; 62,421
-per-instruction and 3,000 whole-function differential cases agree with Unicorn.
-The image maps at its own link address on Windows with a zero slide, which is
-the only place a binary carrying no relocations can correctly go. What is
-missing is the runtime beneath the lifted code: the ObjC dispatch, the
-framework shims, and a window. See [Milestones](#milestones).
+**Status: the game lifts, loads, and dispatches its own messages.** All 626 of
+Canabalt's functions lift to C and the result compiles; 62,421 per-instruction
+and 3,000 whole-function differential cases agree with Unicorn. The image maps
+at its own link address with a zero slide, which is the only place a binary
+carrying no relocations can correctly go. The Objective-C class table is
+realized and `objc_msgSend` dispatches into lifted code. What is missing is the
+framework side: 192 selectors and 205 imports that iOS used to provide, and a
+window. See [Milestones](#milestones).
 
 ---
 
@@ -89,6 +90,8 @@ iparecomp is a lifting project from day one.
 | `runtime/arm32_context.h` | Guest CPU state and the operations lifted code emits — the emitter's target. Barrel shifter with its separate carry-out, unpacked flags, condition predicates, interworking helpers. |
 | `tools/lifter.py` | Lifts armv6/armv7 and Thumb-2 to C, one C function per guest function. `--report` says what fraction of *functions* lift completely, which is the number that decides whether a build is possible. |
 | `tools/lift_verify.py` | Differential-tests lifted instructions against Unicorn on encodings harvested from the real binary, with the image mapped at the same address on both sides. |
+| `runtime/objc_runtime` | Realizes the class table out of `__DATA` and answers `objc_msgSend` by selector, dispatching into lifted code. Reports which selectors the binary sends that nothing in it implements -- the framework contract. |
+| `tools/objc_verify.py` | Checks that runtime's realized table against `objc_dump.py`, which reads the same ABI independently. |
 | `tools/objc_dump.py` | Reads the Objective-C class table straight out of `__DATA` -- classes, methods, selectors, and each method's implementation address. An iOS host contract is a set of classes, and this is how you discover one. |
 | `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
 
@@ -200,10 +203,22 @@ enough to lift in full and check against an emulator.
       the slide is zero, and the unmappable first 64 KB serves as the guard
       page. See
       [The slide has to be zero](docs/ARCHITECTURE.md#the-slide-has-to-be-zero).
-- [ ] **M7 — ObjC runtime.** Class realization from `__objc_classlist`,
-      `objc_msgSend` by selector.
+- [x] **M7 — ObjC runtime.** 49 classes and their metaclasses realized from
+      `__objc_classlist`, categories merged, and the superclass chain named
+      even where it leaves the binary -- a class inheriting `NSObject` has a
+      zero superclass field and a bind entry saying so, so the bind opcodes are
+      read too. `objc_msgSend`, `objc_msgSendSuper2` and `objc_msgSend_stret`
+      are registered at their import stubs, so lifted code that sends a message
+      dispatches into other lifted code. Checked two ways: the realized table
+      agrees with `objc_dump.py`, an independent reader, on all 49 classes and
+      518 method pairs; and 88/88 real messages sent through the stub, the
+      native table and the runtime arrive at the implementation the table
+      names.
 - [ ] **M8 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,
-      CoreGraphics, OpenAL, AudioToolbox.
+      CoreGraphics, OpenAL, AudioToolbox. The work list is now measured on both
+      sides: 205 undefined symbols grouped by owing framework, and 192 of
+      Canabalt's 506 referenced selectors that no class in the binary
+      implements. The other 314 are answered by the game's own lifted code.
 - [ ] **M9 — a window.**
 
 ## Ports

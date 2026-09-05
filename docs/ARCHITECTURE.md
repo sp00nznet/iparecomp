@@ -281,6 +281,57 @@ The same applies to `libSystem`, `libstdc++` and `libgcc` imports: they are
 resolved by name against the host C runtime wherever the signature matches,
 which is most of them.
 
+### How lifted code reaches the runtime at all
+
+Three pieces had to exist before a message could be sent, and each was missing
+for a different reason.
+
+**A stub address is the name of an import.** Lifted code calls `objc_msgSend`
+by branching to its stub in `__TEXT,__symbolstub1`, which is outside `__text`
+and therefore never lifted. Turning that address back into a symbol does not
+need the bind opcodes: a stub section carries its first index into the indirect
+symbol table and its stride, so entry *i* is indirect symbol `reserved1 + i`.
+That resolves 123 stubs and 147 pointer slots in Canabalt, `_objc_msgSend`
+among them.
+
+**A generated stub must consult the native table, not trap.** The lifter emits
+a body for every branch target it did not lift, and emitting `arc_trap` there
+unconditionally makes every import unreachable by construction. They go through
+`arc_dispatch_miss` instead, which is where registered natives are found.
+
+**"Resolved" is not "is a host function".** On the Android side an import
+resolves to a real host address because the library is loaded natively. Here it
+does not: a guest address is 32 bits and a host function is not, so casting one
+to the other cannot work. `arc_register_native` now takes the host function
+alongside the guest address it answers to.
+
+### Where the class graph leaves the binary
+
+A class that inherits from `NSObject` has a **zero** in its superclass field.
+Not a root class -- a field dyld was going to fill in, with a bind entry
+pointing at it saying `_OBJC_CLASS_$_NSObject`. So the class graph does not say
+where it ends until the bind opcodes are interpreted, which is a small stack
+machine over `LC_DYLD_INFO`.
+
+Canabalt has 848 bindings, 281 of them landing inside `__objc_data` -- the
+class structures themselves. Reading them turns "this superclass is external"
+into "this superclass is `UIView`", which is the difference between a trap that
+says something is missing and one that says what to write:
+
+```
+objc_msgSend: +FlxGame does not respond to alloc, owed by NSObject
+```
+
+### What the runtime is asked for, exactly
+
+Of 506 selectors the binary references, **314 are implemented by its own
+classes** and answered by lifted code; 192 are not implemented anywhere in the
+image and must come from a framework. Which receiver a given send has is not a
+static fact -- that is the entire reason `objc_msgSend` is a shim boundary
+rather than something to lift -- so this cannot say which class owes which
+selector. What it can say exactly is which selectors have no implementation at
+all, and that is the contract.
+
 ## Verification
 
 The emitter is checked the way androidrecomp checks its own: differentially,

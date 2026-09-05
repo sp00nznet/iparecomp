@@ -1173,9 +1173,14 @@ def emit_program(lifter: Lifter, bodies, out_dir: str, shards: int) -> None:
 
     with open(os.path.join(out_dir, "stubs.c"), "w", encoding="utf-8") as fh:
         fh.write('#include "lifted.h"\n\n')
+        fh.write("// A branch target with no lifted body. Most of these are\n"
+                 "// import stubs -- objc_msgSend, malloc, glDrawArrays -- so\n"
+                 "// they go through the runtime's native table first and trap\n"
+                 "// only if nothing claimed them. Trapping here unconditionally\n"
+                 "// would make every import unreachable by construction.\n")
         for a in stubs:
             fh.write(f'void {Lifter.name(a)}(Arm32Ctx* c) {{ '
-                     f'arc_trap(c, "unlifted {Lifter.name(a)}"); }}\n')
+                     f'arc_dispatch_miss(c, {a:#010x}u); }}\n')
 
     every = sorted(defined | set(stubs))
     with open(os.path.join(out_dir, "lifted.h"), "w", encoding="utf-8") as fh:

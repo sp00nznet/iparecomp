@@ -13,6 +13,7 @@
 // modern host runs that natively, so iparecomp is a lifting project from the
 // first day -- there is no arm64-host shortcut of the kind androidrecomp gets.
 #include <algorithm>
+#include <csetjmp>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include "macho_image.h"
+#include "objc_runtime.h"
 
 namespace {
 
@@ -33,6 +35,11 @@ void Usage() {
       "              with none, every Objective-C class in the binary is listed,\n"
       "              which is how you discover a title's contract.");
 }
+
+// Where a lifted branch would have gone. Recording it instead of taking it is
+// what lets the dispatch check run in a build with no lifted program.
+uint32_t g_last_dispatch = 0;
+void RecordDispatch(Arm32Ctx*, uint32_t target) { g_last_dispatch = target; }
 
 std::vector<std::string> ReadContract(const std::string& path) {
   std::vector<std::string> out;
@@ -51,12 +58,14 @@ std::vector<std::string> ReadContract(const std::string& path) {
 
 int main(int argc, char** argv) {
   std::string path, arch, contract;
+  bool want_objc = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--help" || a == "-h") { Usage(); return 0; }
     else if (a == "--arch" && i + 1 < argc) arch = argv[++i];
     else if (a.rfind("--arch=", 0) == 0) arch = a.substr(7);
     else if (a.rfind("--contract=", 0) == 0) contract = a.substr(11);
+    else if (a == "--objc") want_objc = true;
     else path = a;
   }
   if (path.empty()) { Usage(); return 2; }
@@ -115,6 +124,98 @@ int main(int argc, char** argv) {
       note = "  -- NOT at its link address";
     std::printf("           %-12s %08X +%#-8x host %p%s\n", s.name.c_str(),
                 s.vmaddr, s.filesize, s.mapped, note);
+  }
+
+  // The Objective-C half. Reported rather than reverse engineered: the ABI
+  // writes the class table into __DATA in a documented layout, and the bind
+  // table says exactly where the class graph leaves the binary.
+  if (want_objc) {
+    if (!arc::Objc().Init(img)) {
+      std::printf("\nobjc: %s\n", arc::Objc().error().c_str());
+      return 1;
+    }
+    size_t methods = 0, external = 0;
+    for (const auto& c : arc::Objc().classes()) {
+      methods += c.methods.size();
+      if (!c.external_super.empty()) ++external;
+    }
+    std::printf("\nobjc classes  %zu (%zu of them inherit from a framework "
+                "class)\n", arc::Objc().classes().size(), external);
+    std::printf("objc methods  %zu defined, %zu (class, selector) pairs "
+                "resolved\n", methods, arc::Objc().method_count());
+
+    // Send some real messages down the exact path a lifted `bl` takes: the
+    // import stub, the runtime's native table, objc_msgSend, the method
+    // lookup, and out to the implementation's address. Nothing is stubbed
+    // here except the final branch, which is recorded rather than taken so
+    // that this works without the lifted program linked in.
+    arc::InstallObjcRuntime(img);
+    const arc::Section* bss = img.FindSection("__DATA", "__bss");
+    uint32_t stub = 0;
+    for (const auto& im : img.imports())
+      if (im.name == "_objc_msgSend") stub = im.stub;
+    if (bss && bss->size >= 4 && stub) {
+      arc_set_dispatch(RecordDispatch);
+      size_t sent = 0, agreed = 0;
+      for (const auto& c : arc::Objc().classes()) {
+        if (c.methods.empty()) continue;
+        const arc::ObjcMethod& m = c.methods.front();
+        // A receiver is just a word holding its class. __bss is zeroed and
+        // nothing has run, so borrowing four bytes of it is safe; it is put
+        // back immediately.
+        const uint32_t obj = bss->addr;
+        const uint32_t saved = ARC_LD32(obj);
+        ARC_ST32(obj, c.addr);
+        Arm32Ctx ctx;
+        std::memset(&ctx, 0, sizeof ctx);
+        ctx.image_base = img.link_base();
+        ARC_W(&ctx, 0, obj);
+        ARC_W(&ctx, 1, m.selector_addr);
+        g_last_dispatch = 0;
+        // A message that finds nothing traps, and a trap here is a result
+        // rather than a reason to stop: catch it, count it, keep going.
+        std::jmp_buf recovery;
+        arc_set_recovery(&recovery);
+        const bool trapped = setjmp(recovery) != 0;
+        if (!trapped) arc_dispatch_miss(&ctx, stub);
+        arc_set_recovery(nullptr);
+        ARC_ST32(obj, saved);
+        ++sent;
+        if (!trapped && g_last_dispatch == m.imp) {
+          ++agreed;
+        } else if (sent - agreed <= 3) {
+          std::printf("  MISS %s%s %s -- %s\n", c.meta ? "+" : "-",
+                      c.name.c_str(), m.selector.c_str(),
+                      trapped ? arc_last_trap() : "wrong implementation");
+        }
+      }
+      arc_set_dispatch(nullptr);
+      std::printf("dispatch      %zu/%zu messages reached the right "
+                  "implementation\n", agreed, sent);
+    }
+
+    const auto& owed = arc::Objc().unanswered();
+    std::printf("\nselectors     %zu referenced: %zu answered by this "
+                "binary's own classes,\n              %zu owed by the "
+                "frameworks\n",
+                arc::Objc().referenced(), arc::Objc().answered(), owed.size());
+    // The shim work list. Exact in the same sense the import list is: it says
+    // what is sent and not implemented, without guessing at receivers.
+    for (size_t i = 0; i < owed.size(); ++i)
+      std::printf("    %s\n", owed[i].c_str());
+
+    // The table itself. Empty classes are printed too: a class with no
+    // methods of its own is not nothing -- it inherits -- and leaving it
+    // out makes the listing look like it lost one.
+    for (const auto& c : arc::Objc().classes()) {
+      std::printf("\n%s%s : %s\n", c.meta ? "+" : "", c.name.c_str(),
+                  c.external_super.empty() ? "(in image)"
+                                           : c.external_super.c_str());
+      for (const auto& m : c.methods)
+        std::printf("    %-48s %#010x%s\n", m.selector.c_str(), m.imp,
+                    m.from_category ? "  (category)" : "");
+    }
+    return 0;
   }
 
   const size_t thumb = img.thumb_count();

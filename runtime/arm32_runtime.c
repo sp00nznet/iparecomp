@@ -94,7 +94,11 @@ void arc_frame_clear(void) { t_frame_next = t_frame_seen = 0; }
 
 // --- native call bridge ----------------------------------------------------
 
-typedef struct { uint32_t address; const char* name; } NativeEntry;
+typedef struct {
+  uint32_t address;
+  const char* name;
+  ArcNativeFn fn;
+} NativeEntry;
 
 // ponytail: a linear array, searched only on a dispatch miss -- once per call
 // *out* of the guest. Sort it and bisect if a profile ever says otherwise.
@@ -118,12 +122,13 @@ void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn) {
   ++g_ctx_native_count;
 }
 
-void arc_register_native(uint32_t address, const char* name) {
-  if (!address || g_native_count >= ARC_MAX_NATIVES) return;
+void arc_register_native(uint32_t address, const char* name, ArcNativeFn fn) {
+  if (!address || !fn || g_native_count >= ARC_MAX_NATIVES) return;
   for (size_t i = 0; i < g_native_count; ++i)
     if (g_natives[i].address == address) return;
   g_natives[g_native_count].address = address;
   g_natives[g_native_count].name = name;
+  g_natives[g_native_count].fn = fn;
   ++g_native_count;
 }
 
@@ -133,10 +138,8 @@ void arc_register_native(uint32_t address, const char* name) {
 // nearly everything a guest asks the host for. It does NOT carry
 // floating-point arguments (VFP, or r0-r3 again under the soft-float ABI these
 // binaries were built with), and it does not carry a returned double in
-// r0:r1. Generate per-signature thunks from the import list when a title
-// actually needs one.
-typedef uint32_t (*ArcNative8)(uint32_t, uint32_t, uint32_t, uint32_t,
-                               uint32_t, uint32_t, uint32_t, uint32_t);
+// r0:r1. Register those through arc_register_ctx_native, which sees the whole
+// context, rather than widening this.
 
 static ArcDispatchFn g_dispatch;
 
@@ -180,9 +183,8 @@ void arc_dispatch_miss(Arm32Ctx* c, uint32_t target) {
                 g_natives[i].name, c->r[0], c->r[1], c->r[2], c->r[3]);
     }
     const uint32_t* stack = (const uint32_t*)(uintptr_t)ARC_SP(c);
-    ArcNative8 fn = (ArcNative8)(uintptr_t)addr;
-    c->r[0] = fn(c->r[0], c->r[1], c->r[2], c->r[3],
-                 stack[0], stack[1], stack[2], stack[3]);
+    c->r[0] = g_natives[i].fn(c->r[0], c->r[1], c->r[2], c->r[3],
+                              stack[0], stack[1], stack[2], stack[3]);
     return;
   }
   char msg[128];

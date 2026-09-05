@@ -355,7 +355,17 @@ const char* arc_last_trap(void);
 // Calling out of the guest. An import is reached the way a virtual method is:
 // the guest loads a stub pointer and branches to it. That address is a *host*
 // function the shim supplied, so it will never be in the lifted table.
-void arc_register_native(uint32_t address, const char* name);
+// The guest reaches an import by branching to its stub, so the *stub address*
+// is the name the runtime knows it by -- but that address is a 32-bit number
+// in guest space and the host function is not reachable through it. The two
+// have to be registered together. "Resolved" never means "is a host function".
+typedef uint32_t (*ArcNativeFn)(uint32_t, uint32_t, uint32_t, uint32_t,
+                                uint32_t, uint32_t, uint32_t, uint32_t);
+void arc_register_native(uint32_t address, const char* name, ArcNativeFn fn);
+
+// The fuller form: everything the plain thunk cannot express -- a float
+// argument, a struct return, or anything that has to see the guest's own
+// registers. objc_msgSend is one of these.
 typedef void (*ArcCtxFn)(Arm32Ctx*);
 void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn);
 

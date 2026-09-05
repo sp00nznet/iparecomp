@@ -28,6 +28,11 @@ namespace arc {
 struct Section {
   std::string segment, name;
   uint32_t addr = 0, size = 0, fileoff = 0;
+  // The low byte of flags is the section *type*, which is what says a section
+  // holds symbol stubs or symbol pointers. reserved1 is then its first index
+  // into the indirect symbol table and reserved2 the stride, which together
+  // are how a stub address is turned back into the symbol it stands for.
+  uint32_t flags = 0, reserved1 = 0, reserved2 = 0;
 };
 
 struct Segment {
@@ -40,8 +45,27 @@ struct Segment {
 struct Import {
   std::string name;
   std::string dylib;     // resolved from the symbol's library ordinal
-  uint32_t stub = 0;     // address of its stub, when one was found
+  // Two guest addresses stand for one import, and they are reached by
+  // different instructions. `stub` is code -- what a `bl` targets. `slot` is
+  // the data word an indirect call loads before branching. Both must resolve
+  // to the same shim.
+  uint32_t stub = 0;
+  uint32_t slot = 0;
   void* bound = nullptr; // what the shim supplied, or null while outstanding
+};
+
+// One entry of the dyld bind tables: the address of a pointer-sized word that
+// dyld would have filled in with `symbol`.
+//
+// This is how an external Objective-C class reaches the binary. A class whose
+// superclass is NSObject has a zero in its superclass field on disk and a bind
+// entry naming `_OBJC_CLASS_$_NSObject` that points at it -- so the class graph
+// only says where it leaves the binary once these are read.
+struct Binding {
+  uint32_t address = 0;
+  std::string symbol;
+  std::string dylib;
+  bool lazy = false;
 };
 
 struct Export {
@@ -75,6 +99,12 @@ class MachOImage {
   const std::vector<Import>& imports() const { return imports_; }
   const std::vector<Export>& exports() const { return exports_; }
   const std::vector<std::string>& dylibs() const { return dylibs_; }
+  const std::vector<Binding>& bindings() const { return bindings_; }
+
+  // What dyld would have written at `address`, or an empty string. The
+  // Objective-C runtime asks this to name the framework class a guest class
+  // inherits from, since that field is zero until something binds it.
+  const std::string& BoundSymbolAt(uint32_t address) const;
 
   const Section* FindSection(const std::string& seg, const std::string& name) const;
 
@@ -102,6 +132,10 @@ class MachOImage {
   std::vector<Import> imports_;
   std::vector<Export> exports_;
   std::vector<std::string> dylibs_;
+  std::vector<Binding> bindings_;
+  void ParseBindings(const uint8_t* base, uint32_t off, uint32_t size,
+                     bool lazy);
+
   std::string arch_, error_;
   uint32_t entry_ = 0, slide_ = 0, link_base_ = 0;
   bool encrypted_ = false;

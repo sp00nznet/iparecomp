@@ -16,6 +16,7 @@ endif()
 add_library(iparecomp STATIC
   runtime/macho_image.cpp
   runtime/arm32_runtime.c
+  runtime/objc_runtime.cpp
 )
 target_include_directories(iparecomp PUBLIC runtime)
 
