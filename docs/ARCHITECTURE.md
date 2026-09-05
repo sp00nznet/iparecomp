@@ -472,6 +472,60 @@ Zero is not "no superclass". It is the same unbound field the class graph has
 everywhere else, and the bind table names it. Crossing to the host class object
 there is what took the run from stopping in `-[FlxGlobal init]` to finishing.
 
+### OpenGL ES is the reason to recompile rather than emulate
+
+Every OpenGL ES 1.1 entry point Canabalt uses is also OpenGL 1.1, under the
+same name with the same semantics. The shims are therefore calls, not
+translations, and the system library resolves all of them with no loader and no
+extensions -- `glOrthof` taking floats where desktop GL takes doubles is the
+only difference in thirty-eight functions.
+
+That is worth stating plainly because it inverts the usual comparison. An
+emulator for this era has to implement the PowerVR MBX, which is undocumented,
+tile-based, and the hardest single piece of the machine. A recompiler replaces
+the *call* instead of the chip, and the call is free. The framebuffer object
+is not even created: the guest asks for one, gets a plausible name, and its
+drawing lands in the window directly.
+
+### Answer honestly, not plausibly
+
+Audio is not implemented, and there are two ways to say so. `AudioSession` is
+told everything worked, because nothing depends on it. Opening a *file* is told
+it failed -- with the error code the real framework returns, so a caller
+matching on it behaves as it would.
+
+The first attempt reported success with a zero length, and the game allocated a
+buffer from a size it had never been given: a quarter of a gigabyte out of the
+guest heap in one call. A refusal the game already handles beats a success it
+cannot, and the game's own log says so:
+
+```
+[guest] Error opening file (bomb_explode.caf): 2003334207
+```
+
+### An empty class reference, again
+
+`___CFConstantStringClassReference` is one bind symbol that every `@"..."` in
+the binary points its isa at. Skipping it left every string literal in the
+program with a null class, so `copy` or `UTF8String` sent to one went nowhere
+-- the same failure as the empty `__objc_classrefs` slot and just as quiet.
+Binding it took the count of filled class references from 220 to 504.
+
+### The hierarchy has to exist before anything names it
+
+Host classes are created on first mention and never re-parented, so whichever
+call happens first decides the superclass. A shim table mentioning UIImageView
+in passing rooted it at NSObject and cut it off from everything UIView owns,
+which showed up as `-[UIImageView setAlpha:]` not being found while UIView
+plainly had it.
+
+### What a permissive run cannot do
+
+Answering nil and carrying on works because nil is a legitimate answer -- but
+a loop whose exit condition depends on the answer will not terminate if the
+answer is always nil. A measuring run that never ends measures nothing, so
+there is a budget on it, and reaching that budget is reported as what it is.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the

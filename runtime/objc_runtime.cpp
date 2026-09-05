@@ -361,6 +361,15 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     // Nil, and written down. An Objective-C caller is entitled to a nil
     // answer, so most of the startup path keeps going and the next thing it
     // needs becomes visible in the same run.
+    //
+    // The hazard is real and worth a stop rather than a comment: a loop whose
+    // exit condition depends on an answer will not terminate if the answer is
+    // always nil, and a measuring run that never ends measures nothing. The
+    // budget is large enough that no honest launch reaches it.
+    static long budget = 2000000;
+    if (--budget < 0)
+      arc_trap(c, "permissive mode answered two million messages with nil; "
+                  "the guest is almost certainly looping on one of them");
     const std::string cn = where ? where : "?";
     const std::string sn = name ? name : "(unreadable selector)";
     if (g_missing_seen.insert(cn + " " + sn).second)
@@ -370,9 +379,14 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   }
   if (!k) {
     char msg[256];
-    std::snprintf(msg, sizeof msg, "objc_msgSend: %s does not respond to %s",
+    // An unknown class is usually a bad pointer rather than a missing method,
+    // and the two want telling apart -- so say what was actually in the
+    // registers instead of only that the lookup failed.
+    std::snprintf(msg, sizeof msg,
+                  "objc_msgSend: %s does not respond to %s "
+                  "(receiver %#x, isa %#x)",
                   where ? where : "an unknown class",
-                  name ? name : "(unreadable selector)");
+                  name ? name : "(unreadable selector)", receiver, cls);
     arc_trap(c, msg);
     return;
   }
@@ -417,6 +431,39 @@ void MsgSendSuper2(Arm32Ctx* c) {
   Send(c, receiver, super, ARC_R(c, 1));
 }
 
+// --- the property helpers --------------------------------------------------
+// A synthesized property accessor does not read or write the ivar itself; it
+// calls into the runtime, which is where atomicity and retain semantics would
+// live. Neither applies here -- nothing is threaded and nothing is reference
+// counted -- so each of these is the copy it would have ended up doing.
+
+// objc_copyStruct(dest, src, size, atomic, hasStrong)
+void CopyStruct(Arm32Ctx* c) {
+  const uint32_t dst = ARC_R(c, 0), src = ARC_R(c, 1), n = ARC_R(c, 2);
+  if (dst && src && n && n < (1u << 20))
+    memmove(reinterpret_cast<void*>(uintptr_t(dst)),
+            reinterpret_cast<const void*>(uintptr_t(src)), n);
+}
+
+// objc_getProperty(self, _cmd, offset, atomic)
+void GetProperty(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0), offset = ARC_R(c, 2);
+  ARC_W(c, 0, self ? ARC_LD32(self + offset) : 0);
+}
+
+// objc_setProperty(self, _cmd, offset, value, atomic, shouldCopy)
+void SetProperty(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0), offset = ARC_R(c, 2), value = ARC_R(c, 3);
+  if (self) ARC_ST32(self + offset, value);
+}
+
+// Raised when a collection is mutated while being enumerated. Reaching it is
+// a bug in the guest, not here, and it is loud on a device too.
+void EnumerationMutation(Arm32Ctx* c) {
+  arc_trap(c, "objc_enumerationMutation: a collection changed while being "
+               "enumerated");
+}
+
 void MsgSendStret(Arm32Ctx* c) {
   // A struct-returning send puts the hidden return pointer in r0, so the
   // receiver and selector shift up by one register.
@@ -441,6 +488,15 @@ void InstallObjcRuntime(const MachOImage& img) {
       arc_register_ctx_native(im.stub, "objc_msgSendSuper2", MsgSendSuper2);
     else if (im.name == "_objc_msgSend_stret")
       arc_register_ctx_native(im.stub, "objc_msgSend_stret", MsgSendStret);
+    else if (im.name == "_objc_copyStruct")
+      arc_register_ctx_native(im.stub, "objc_copyStruct", CopyStruct);
+    else if (im.name == "_objc_getProperty")
+      arc_register_ctx_native(im.stub, "objc_getProperty", GetProperty);
+    else if (im.name == "_objc_setProperty")
+      arc_register_ctx_native(im.stub, "objc_setProperty", SetProperty);
+    else if (im.name == "_objc_enumerationMutation")
+      arc_register_ctx_native(im.stub, "objc_enumerationMutation",
+                              EnumerationMutation);
   }
 }
 

@@ -9,6 +9,8 @@
 // counting, no threading, and dictionaries keyed by string content rather than
 // by a real hash of an arbitrary object.
 #include <cmath>
+#include "macho_image.h"
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -372,6 +374,79 @@ void AddOperation(Arm32Ctx* c) {
 }
 
 void Nop(Arm32Ctx* c) { ARC_W(c, 0, 0); }
+void SelfMethod(Arm32Ctx*) {}
+
+// The bundle's resources are wherever the host was started from. A real path
+// beats a plausible one: anything that opens it succeeds or fails honestly
+// instead of failing later for a reason that looks unrelated.
+void ResourcePath(Arm32Ctx* c) { ARC_W(c, 0, MakeString(".")); }
+
+void ValueWithPointer(Arm32Ctx* c) {
+  const uint32_t obj = HostAllocInstance(HostClass("NSValue", "NSObject"));
+  if (obj) Fields()[obj]["pointer"] = ARC_R(c, 2);
+  ARC_W(c, 0, obj);
+}
+
+void PointerValue(Arm32Ctx* c) {
+  auto it = Fields().find(ARC_R(c, 0));
+  ARC_W(c, 0, it == Fields().end() ? 0 : it->second["pointer"]);
+}
+
+// --- plain C imports that want the same machinery --------------------------
+
+// NSLog is the game talking. It costs nothing to answer and it is the only
+// channel the guest has for saying what it thinks is happening, which during
+// bring-up is worth more than most of what a shim could return.
+void NSLogShim(Arm32Ctx* c) {
+  const std::string fmt = StringText(ARC_R(c, 0));
+  std::vector<uint32_t> args;
+  for (uint32_t r = 1; r <= 3; ++r) args.push_back(ARC_R(c, r));
+  const uint32_t sp = ARC_SP(c);
+  for (int i = 0; i < 24 && arc_guest_owns(sp + i * 4, 4); ++i)
+    args.push_back(ARC_LD32(sp + i * 4));
+  std::printf("[guest] %s\n", FormatWith(fmt, args).c_str());
+  ARC_W(c, 0, 0);
+}
+
+// A directory the guest may write a high score into. It gets a real path so
+// that anything opening it succeeds, rather than a plausible-looking string
+// that fails at the first use.
+void SearchPathForDirectories(Arm32Ctx* c) {
+  const uint32_t arr = MakeDict("NSArray");
+  Dicts()[arr]["0"] = MakeString(".");
+  ARC_W(c, 0, arr);
+}
+
+void StringFromClass(Arm32Ctx* c) {
+  const uint32_t cls = ARC_R(c, 0);
+  const ObjcClass* k = Objc().ClassAt(cls);
+  const char* name = k ? k->name.c_str() : HostClassName(cls);
+  ARC_W(c, 0, MakeString(name ? name : ""));
+}
+
+void ClassFromString(Arm32Ctx* c) {
+  const std::string want = StringText(ARC_R(c, 0));
+  for (const auto& k : Objc().classes())
+    if (!k.meta && k.name == want) {
+      ARC_W(c, 0, k.addr);
+      return;
+    }
+  ARC_W(c, 0, HostClassByName(want.c_str(), false));
+}
+
+// Seconds since the reference date. Only the differences matter -- this is
+// what the frame timer is built on -- so the epoch is arbitrary and the
+// monotonicity is not.
+void AbsoluteTimeGetCurrent(Arm32Ctx* c) {
+  static const auto start = std::chrono::steady_clock::now();
+  const double t = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - start)
+                       .count();
+  uint64_t bits;
+  std::memcpy(&bits, &t, 8);
+  ARC_W(c, 0, uint32_t(bits));
+  ARC_W(c, 1, uint32_t(bits >> 32));
+}
 
 struct Entry {
   const char* cls;
@@ -431,7 +506,48 @@ const Entry kEntries[] = {
     {"NSBundle", false, "infoDictionary", ObjectForKey},
     {"NSUserDefaults", false, "registerDefaults:", Nop},
     {"UIColor", false, "CGColor", NilMethod},
+
+    {"NSObject", false, "copy", SelfMethod},
+    {"NSObject", false, "mutableCopy", SelfMethod},
+    {"NSBundle", false, "resourcePath", ResourcePath},
+    {"NSBundle", false, "bundlePath", ResourcePath},
+    {"NSBundle", false, "pathForResource:ofType:", NilMethod},
+    {"NSValue", true, "valueWithPointer:", ValueWithPointer},
+    {"NSValue", false, "pointerValue", PointerValue},
+    {"NSNotificationCenter", true, "defaultCenter",
+     StandardUserDefaults},
+    {"NSNotificationCenter", false,
+     "addObserver:selector:name:object:", Nop},
+    {"NSNotificationCenter", false, "removeObserver:", Nop},
+    {"NSNotificationCenter", false, "postNotificationName:object:", Nop},
+    {"UIImage", true, "imageNamed:", NilMethod},
+    {"UIImageView", false, "initWithImage:", SelfMethod},
+    {"UIDevice", false, "uniqueIdentifier", ResourcePath},
+    {"UIDevice", false, "systemVersion", ResourcePath},
+    {"NSString", false, "stringByAppendingFormat:", SelfMethod},
+    {"NSString", false, "stringByAppendingString:", SelfMethod},
+    {"NSMutableString", false, "appendString:", Nop},
+    {"NSMutableString", false, "appendFormat:", Nop},
+    {"NSArray", true, "array", Nop},
+    {"NSMutableArray", true, "array", Nop},
+    {"NSMutableArray", false, "addObject:", Nop},
+    {"NSMutableArray", false, "count", Nop},
 };
+
+struct CImport {
+  const char* name;
+  ArcCtxFn fn;
+};
+
+const CImport kCImports[] = {
+    {"_NSLog", NSLogShim},
+    {"_NSSearchPathForDirectoriesInDomains", SearchPathForDirectories},
+    {"_NSStringFromClass", StringFromClass},
+    {"_NSClassFromString", ClassFromString},
+    {"_CFAbsoluteTimeGetCurrent", AbsoluteTimeGetCurrent},
+};
+
+}  // namespace
 
 // Run everything queued. Nothing calls this yet -- it wants a run loop, which
 // wants a window -- but the operations are kept rather than dropped so that
@@ -458,7 +574,18 @@ size_t DrainOperations(Arm32Ctx* c) {
   return ran;
 }
 
-}  // namespace
+size_t InstallFoundationCImports(const MachOImage& img) {
+  size_t claimed = 0;
+  for (const auto& im : img.imports()) {
+    if (!im.stub) continue;
+    for (const auto& e : kCImports)
+      if (im.name == e.name) {
+        arc_register_ctx_native(im.stub, e.name, e.fn);
+        ++claimed;
+      }
+  }
+  return claimed;
+}
 
 void InstallObjectShims() {
   for (const auto& e : kEntries) {

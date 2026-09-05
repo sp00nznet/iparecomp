@@ -9,6 +9,7 @@
 
 #include "arc_mem.h"
 #include "objc_host.h"
+#include "window.h"
 #include "objc_runtime.h"
 
 namespace arc {
@@ -17,6 +18,12 @@ size_t InstallLibSystemShims(const MachOImage& img);
 size_t InstallUIKitShims(const MachOImage& img);
 bool GuestExited(int* code);
 void InstallObjectShims();
+void InstallClassHierarchy();
+void InstallUIKitObjects();
+size_t InstallGlShims(const MachOImage& img);
+size_t InstallAudioShims(const MachOImage& img);
+size_t InstallFoundationCImports(const MachOImage& img);
+size_t InstallCoreGraphicsShims(const MachOImage& img);
 
 namespace {
 
@@ -73,7 +80,11 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   for (size_t i = 0; i < img.imports().size(); ++i) {
     const Import& im = img.imports()[i];
     if (im.stub || im.slots.empty()) continue;
-    if (const uint32_t at = arc_guest_alloc(4, 4)) {
+    // 64 bytes, not 4. Some of these are not functions at all -- CGPointZero,
+    // CGRectZero, the kSec* and kEAGL* keys -- and the guest reads a constant
+    // out of them rather than branching to them. Zeroed memory is the right
+    // answer for every one of those; four bytes would not be enough to read.
+    if (const uint32_t at = arc_guest_alloc(64, 8)) {
       img.SetImportStub(i, at);
       ++r.synthetic;
     }
@@ -81,13 +92,19 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
 
   r.shims = InstallLibSystemShims(img);
   r.shims += InstallUIKitShims(img);
+  r.shims += InstallGlShims(img);
+  r.shims += InstallAudioShims(img);
+  r.shims += InstallFoundationCImports(img);
+  r.shims += InstallCoreGraphicsShims(img);
   if (Objc().Init(img)) InstallObjcRuntime(img);
   // Host classes first, then the bind sites that point at them. Without this
   // every __objc_classrefs slot reads zero, and a message to nil is answered
   // with zero rather than refused -- so the failure would surface much later
   // and somewhere unrelated.
+  InstallClassHierarchy();
   InstallFoundationClasses();
   InstallObjectShims();
+  InstallUIKitObjects();
   r.bound_classes = BindHostClasses(img);
   r.bound_slots = BindImportSlots(img);
   if (install_lifted) install_lifted(img.link_base());
@@ -137,6 +154,7 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
     r.trap = arc_last_trap();
   }
   arc_set_recovery(nullptr);
+  WindowClose();
   return r;
 }
 

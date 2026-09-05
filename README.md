@@ -3,7 +3,7 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the game runs its whole launch path.** All 626 of Canabalt's functions
+**Status: the game runs, and says so.** All 626 of Canabalt's functions
 lift to C; 62,421 per-instruction and 3,000 whole-function differential cases
 agree with Unicorn. The image maps at its own link address with a zero slide,
 `objc_msgSend` dispatches into lifted code, and the guest now runs from
@@ -244,17 +244,35 @@ enough to lift in full and check against an emulator.
             NSNumber, NSDictionary, NSUserDefaults, NSBundle, NSURL.
       - [x] A category on a framework class answers from lifted code --
             `+[UIColor(HexColor) colorWithHexRed:...]` is the game's own.
-      - [ ] Foundation, UIKit, CoreGraphics, OpenGLES on desktop GL, OpenAL,
-            AudioToolbox.
+      - [x] OpenGLES on desktop GL. Every entry point the game uses is also
+            OpenGL 1.1 under the same name, so the shims are calls rather than
+            a translation layer and `opengl32` resolves them with no loader.
+      - [x] An SDL window with a compatibility GL context, and a frame loop
+            standing in for CADisplayLink and NSRunLoop.
+      - [x] UIScreen, UIWindow, UIView with a real class hierarchy, EAGLContext,
+            CAEAGLLayer.
+      - [x] Audio answered honestly rather than plausibly: the session
+            succeeds, opening a file fails, and the game takes its own
+            no-sound path.
+      - [x] CoreGraphics geometry, written out exactly -- empty rectangles
+            compare equal, containment is half-open, an inset past the middle
+            is the null rect.
+      - [ ] CoreGraphics fonts and images, which is where it stops now:
+            `CGFontRetain` in `-[SSFont initWithSize:]`.
 
-      Canabalt runs its whole launch path and calls `exit(0)`: through
-      `applicationDidFinishLaunching:`, the audio load loop, `-[FlxGame
-      initWithState:orientation:]`, `-[FlxGLView initWithFrame:]` and
-      `-[FlxGame switchState:]`. One permissive run names everything still
-      missing -- 18 messages and 27 imports -- and what it names now is the
-      window itself: `UIScreen mainScreen`, `UIWindow initWithFrame:`,
-      `CADisplayLink displayLinkWithTarget:selector:`, `NSRunLoop
-      currentRunLoop`.
+      Canabalt now runs from `_start` through the whole launch, the audio
+      load loop, the GL view and framebuffer setup, texture loading and sprite
+      construction, and into font loading -- 80 imports answered, 67 to go.
+      It prints its own diagnostics along the way, because `NSLog` works:
+
+      ```
+      [guest] check for other audio!
+      [guest] is other audio playing: 0
+      [guest] Error opening file (bomb_explode.caf): 2003334207
+      ```
+
+      Those audio errors are the shim being honest rather than plausible, and
+      the game taking the path it has for a device with no sound available.
 - [ ] **M9 — a window.**
 
 ## Ports

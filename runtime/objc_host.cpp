@@ -193,6 +193,18 @@ size_t BindHostClasses(const MachOImage& img) {
   static const char kMeta[] = "_OBJC_METACLASS_$_";
   size_t filled = 0;
   for (const auto& b : img.bindings()) {
+    // Every `@"..."` in the binary is a CFConstantString whose isa is bound to
+    // this one symbol. Skipping it leaves every string literal in the program
+    // with a null class, so any message to one -- `copy`, `UTF8String`,
+    // `isEqualToString:` -- goes nowhere. They are NSStrings; say so.
+    if (b.symbol == "___CFConstantStringClassReference") {
+      const uint32_t str = HostClass("NSString", "NSObject");
+      if (str) {
+        W(b.address, str);
+        ++filled;
+      }
+      continue;
+    }
     const bool meta = b.symbol.rfind(kMeta, 0) == 0;
     const bool cls = b.symbol.rfind(kClass, 0) == 0;
     if (!meta && !cls) continue;

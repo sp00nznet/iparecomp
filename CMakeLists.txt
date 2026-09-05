@@ -22,6 +22,11 @@ add_library(iparecomp STATIC
   runtime/objc_host.cpp
   runtime/shim_foundation.cpp
   runtime/shim_objects.cpp
+  runtime/shim_uikit.cpp
+  runtime/shim_gl.cpp
+  runtime/shim_audio.cpp
+  runtime/shim_coregraphics.cpp
+  runtime/window.cpp
   runtime/arc_boot.cpp
 )
 target_include_directories(iparecomp PUBLIC runtime)
@@ -46,6 +51,14 @@ if(SDL2_FOUND)
   # own entry point. Linking it drags in a WinMain that then cannot find the
   # SDL_main it was written to call.
   target_link_libraries(iparecomp PUBLIC $<TARGET_NAME_IF_EXISTS:SDL2::SDL2>)
+  # The GL the guest wants is OpenGL 1.1, which the system library exports
+  # directly -- no loader, no extensions. That is why the GL shims are calls
+  # rather than a translation layer.
+  find_package(OpenGL)
+  if(OPENGL_FOUND)
+    target_link_libraries(iparecomp PUBLIC OpenGL::GL)
+    message(STATUS "iparecomp: OpenGL found -- GLES 1.1 maps straight onto it")
+  endif()
   target_compile_definitions(iparecomp PUBLIC ARC_HAVE_SDL2)
   message(STATUS "iparecomp: SDL2 found -- window enabled")
 else()
