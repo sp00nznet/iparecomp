@@ -173,9 +173,14 @@ static inline ArcShift arc_asr(uint32_t v, uint32_t n, uint32_t cin) {
 }
 
 static inline ArcShift arc_ror(uint32_t v, uint32_t n, uint32_t cin) {
+  // The zero test happens *before* the mask, and that distinction is the whole
+  // subtlety: ROR by 32, 64 or 96 leaves the value alone but still writes C
+  // from bit 31, while ROR by 0 must leave C untouched. Masking first collapses
+  // the two and quietly carries a stale flag into the next conditional.
   ArcShift r;
+  if (n == 0) { r.value = v; r.carry = cin; return r; }
   n &= 31;
-  if (n == 0) { r.value = v; r.carry = cin; }
+  if (n == 0) { r.value = v; r.carry = v >> 31; }
   else { r.value = (v >> n) | (v << (32 - n)); r.carry = (r.value >> 31) & 1; }
   return r;
 }
@@ -188,6 +193,140 @@ static inline ArcShift arc_rrx(uint32_t v, uint32_t cin) {
   return r;
 }
 
+// --- VFP -------------------------------------------------------------------
+// The register file aliases, so these are views rather than conversions:
+// s[2n] and s[2n+1] are the halves of d[n], which is what the hardware does
+// and what the calling convention relies on when a double is passed in two
+// single registers.
+#define ARC_S(c, n) ((c)->v.f32[(n)])
+#define ARC_D(c, n) ((c)->v.f64[(n)])
+#define ARC_SU(c, n) ((c)->v.u32[(n)])
+#define ARC_DU(c, n) ((c)->v.u64[(n)])
+
+// Three places C and the hardware disagree, each producing a plausible wrong
+// number rather than a crash. Inherited from androidrecomp, which found all
+// three the expensive way.
+//
+// 1. An invalid operation -- 0/0, inf - inf, 0 * inf -- yields a NaN whose
+//    sign bit x86 sets and ARM clears. It affects all four basic operations,
+//    not just sqrt. ARM returns its *default* NaN, which is positive.
+// 2. Float-to-integer saturates on ARM and is undefined behaviour in C once
+//    the value does not fit, so it cannot be written as a cast at all.
+// 3. (No vmin/vmax in the armv6 encodings these binaries use. If a later
+//    target brings them: ARM propagates NaN, C's fmin/fmax deliberately do
+//    not, and only fminnm/fmaxnm match C.)
+#define ARC_DEFAULT_NAN_F32 0x7FC00000u
+#define ARC_DEFAULT_NAN_F64 0x7FF8000000000000ull
+
+static inline float arc_dnan_f32(void) {
+  union { uint32_t u; float f; } x;
+  x.u = ARC_DEFAULT_NAN_F32;
+  return x.f;
+}
+
+static inline double arc_dnan_f64(void) {
+  union { uint64_t u; double f; } x;
+  x.u = ARC_DEFAULT_NAN_F64;
+  return x.f;
+}
+
+// A NaN the operation *generated* rather than propagated is the default NaN.
+// A NaN that came in from an operand is passed through as the hardware would.
+#define ARC_FP_OP(T, SUFFIX, EXPR)                                        \
+  static inline T arc_##SUFFIX(T a, T b) {                                \
+    T r = (EXPR);                                                         \
+    if ((r != r) && (a == a) && (b == b)) return arc_dnan_##T##_();       \
+    return r;                                                             \
+  }
+
+static inline float arc_dnan_float_(void) { return arc_dnan_f32(); }
+static inline double arc_dnan_double_(void) { return arc_dnan_f64(); }
+
+ARC_FP_OP(float, addf32, a + b)
+ARC_FP_OP(float, subf32, a - b)
+ARC_FP_OP(float, mulf32, a * b)
+ARC_FP_OP(float, divf32, a / b)
+ARC_FP_OP(double, addf64, a + b)
+ARC_FP_OP(double, subf64, a - b)
+ARC_FP_OP(double, mulf64, a * b)
+ARC_FP_OP(double, divf64, a / b)
+
+static inline float arc_sqrtf32(float a) {
+  if (a < 0.0f) return arc_dnan_f32();
+  return (float)sqrt((double)a);
+}
+
+static inline double arc_sqrtf64(double a) {
+  if (a < 0.0) return arc_dnan_f64();
+  return sqrt(a);
+}
+
+// Saturating, and never a bare cast: the out-of-range case is undefined
+// behaviour in C, which in practice means the optimiser is entitled to assume
+// it cannot happen and delete the guard you wrote after the cast.
+static inline uint32_t arc_f32_to_s32(float v) {
+  if (v != v) return 0;
+  if (v >= 2147483648.0f) return 0x7FFFFFFFu;
+  if (v < -2147483648.0f) return 0x80000000u;
+  return (uint32_t)(int32_t)v;
+}
+
+static inline uint32_t arc_f32_to_u32(float v) {
+  if (v != v || v <= 0.0f) return 0;
+  if (v >= 4294967296.0f) return 0xFFFFFFFFu;
+  return (uint32_t)v;
+}
+
+static inline uint32_t arc_f64_to_s32(double v) {
+  if (v != v) return 0;
+  if (v >= 2147483648.0) return 0x7FFFFFFFu;
+  if (v < -2147483648.0) return 0x80000000u;
+  return (uint32_t)(int32_t)v;
+}
+
+static inline uint32_t arc_f64_to_u32(double v) {
+  if (v != v || v <= 0.0) return 0;
+  if (v >= 4294967296.0) return 0xFFFFFFFFu;
+  return (uint32_t)v;
+}
+
+// A VFP compare writes FPSCR, not the core flags, and a separate `vmrs
+// apsr_nzcv, fpscr` moves them across. Keeping that two-step is not pedantry:
+// there are usually several instructions between the compare and the transfer,
+// and collapsing them would let an intervening integer instruction that sets
+// flags be silently overwritten.
+#define ARC_FPSCR_N 0x80000000u
+#define ARC_FPSCR_Z 0x40000000u
+#define ARC_FPSCR_C 0x20000000u
+#define ARC_FPSCR_V 0x10000000u
+
+static inline uint32_t arc_fp_compare(int lt, int eq, int unordered) {
+  // Unordered sets C and V and clears N and Z, which is what makes an
+  // unsigned-style condition (`hi`, `ls`) the way a NaN-safe float comparison
+  // is spelled on this architecture.
+  if (unordered) return ARC_FPSCR_C | ARC_FPSCR_V;
+  if (eq) return ARC_FPSCR_Z | ARC_FPSCR_C;
+  if (lt) return ARC_FPSCR_N;
+  return ARC_FPSCR_C;
+}
+
+static inline void arc_vcmp_f32(Arm32Ctx* c, float a, float b) {
+  c->fpscr = (c->fpscr & 0x0FFFFFFFu) |
+             arc_fp_compare(a < b, a == b, (a != a) || (b != b));
+}
+
+static inline void arc_vcmp_f64(Arm32Ctx* c, double a, double b) {
+  c->fpscr = (c->fpscr & 0x0FFFFFFFu) |
+             arc_fp_compare(a < b, a == b, (a != a) || (b != b));
+}
+
+static inline void arc_vmrs_nzcv(Arm32Ctx* c) {
+  c->nf = (c->fpscr & ARC_FPSCR_N) != 0;
+  c->zf = (c->fpscr & ARC_FPSCR_Z) != 0;
+  c->cf = (c->fpscr & ARC_FPSCR_C) != 0;
+  c->vf = (c->fpscr & ARC_FPSCR_V) != 0;
+}
+
 // --- memory ----------------------------------------------------------------
 // Guest pointers are host pointers, so these are dereferences with the guest's
 // width and signedness. They exist as functions rather than casts so that a
@@ -197,6 +336,11 @@ static inline ArcShift arc_rrx(uint32_t v, uint32_t cin) {
 #define ARC_LD16(a) (*(uint16_t*)(uintptr_t)(a))
 #define ARC_LD16S(a) ((uint32_t)(int32_t)*(int16_t*)(uintptr_t)(a))
 #define ARC_LD32(a) (*(uint32_t*)(uintptr_t)(a))
+// A doubleword access is two words in the guest's eyes and is only ever
+// 4-byte aligned, so it is spelled as two rather than as one unaligned 64-bit
+// dereference the host may not permit.
+#define ARC_LD64(a) ((uint64_t)ARC_LD32(a) | ((uint64_t)ARC_LD32((a) + 4) << 32))
+#define ARC_ST64(a, v)                                     do {                                                       const uint64_t v_ = (uint64_t)(v);                       ARC_ST32((a), (uint32_t)v_);                             ARC_ST32((a) + 4, (uint32_t)(v_ >> 32));               } while (0)
 #define ARC_ST8(a, v)  (*(uint8_t*)(uintptr_t)(a) = (uint8_t)(v))
 #define ARC_ST16(a, v) (*(uint16_t*)(uintptr_t)(a) = (uint16_t)(v))
 #define ARC_ST32(a, v) (*(uint32_t*)(uintptr_t)(a) = (uint32_t)(v))
@@ -222,6 +366,14 @@ void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn);
 // lifter recorded for that function, and a mismatch is a trap, not a guess.
 #define ARC_THUMB_BIT(target) ((target) & 1u)
 #define ARC_CODE_ADDR(target) ((target) & ~1u)
+
+// The library owns `arc_dispatch` because the shim itself has to dispatch -- a
+// guest callback or thread entry point is a guest address, not a host
+// function. But only the generated module knows the address -> function table,
+// so it installs its own here. Anything the shim calls is *defined* in the
+// library; anything generated *plugs in*.
+typedef void (*ArcDispatchFn)(Arm32Ctx*, uint32_t);
+void arc_set_dispatch(ArcDispatchFn fn);
 
 void arc_dispatch(Arm32Ctx* c, uint32_t target);
 void arc_dispatch_miss(Arm32Ctx* c, uint32_t target);

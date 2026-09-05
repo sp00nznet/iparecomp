@@ -15,6 +15,7 @@ endif()
 # A port links this and supplies only its own bundle-specific bridge.
 add_library(iparecomp STATIC
   runtime/macho_image.cpp
+  runtime/arm32_runtime.c
 )
 target_include_directories(iparecomp PUBLIC runtime)
 

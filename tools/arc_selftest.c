@@ -56,6 +56,15 @@ static void shifter(void) {
   assert(arc_ror(0x0000000Fu, 4, 0).value == 0xF0000000u);
   assert(arc_ror(0x0000000Fu, 4, 0).carry == 1);
   assert(arc_ror(0x12345678u, 0, 1).carry == 1);
+  /* ROR by a register amount that is a multiple of 32 is not ROR #0. The value
+     is unchanged either way, but the flag is not: a multiple of 32 writes C
+     from bit 31 and only a true zero leaves C alone. Mask the amount before
+     testing it for zero and the two collapse, which loses a carry between a
+     shift and the conditional that consumes it. */
+  assert(arc_ror(0x80000000u, 32, 0).value == 0x80000000u);
+  assert(arc_ror(0x80000000u, 32, 0).carry == 1);
+  assert(arc_ror(0x7FFFFFFFu, 64, 1).carry == 0);
+  assert(arc_ror(0x80000000u, 0, 0).carry == 0);
 
   // RRX rotates through carry: one bit, carry in at the top, bit 0 out.
   assert(arc_rrx(0x00000001u, 1).value == 0x80000000u);
