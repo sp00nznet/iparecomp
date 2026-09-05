@@ -376,6 +376,65 @@ as a one-ULP disagreement on int-to-float. The emitter assumes the default
 rounding mode, which is what the ABI sets and what C's own conversions use.
 That assumption is now written down instead of accidentally true.
 
+## Running it
+
+### A 32-bit guest cannot hold a host pointer
+
+This has no equivalent on the Android side, where guest and host are both
+64-bit, and it is not something a shim can paper over. Forward `malloc` to the
+host's `malloc` and it compiles, links, runs, and hands the guest the bottom
+half of a 64-bit address. Nothing fails at the call: a plausible pointer comes
+back and faults much later, somewhere unrelated.
+
+So the guest gets its own heap and stack, reserved low enough to be
+addressable in 32 bits, and every shim that returns a pointer allocates from
+there. It is a bump allocator and `free` does nothing -- sized against the
+machine the game shipped on, which had 128 MB of RAM in total, so half a
+gigabyte that is never reclaimed is far more than the game can have been
+written to need, and exhausting it is loud rather than silent.
+
+### An empty class reference is worse than a missing one
+
+`main` begins `[[NSAutoreleasePool alloc] init]`. With nothing bound into
+`__objc_classrefs` the guest loads zero, sends to nil, and gets zero back --
+and a message to nil is not an error in Objective-C, it is an answer. So the
+pool is silently not created and nothing complains.
+
+That is why framework classes are *objects in guest memory* rather than a
+host-side table. `NSObject` has a real class_t and class_ro_t at a real guest
+address, laid out exactly as the ABI defines, so the same reader walks host and
+guest classes alike and the 220 bind sites dyld would have filled can be filled
+with something. What differs is only where the implementation lives: a guest
+class's method list points at lifted code, a host class's methods are C
+functions held beside the class object.
+
+### One run should name the whole contract
+
+`--run` stops at the first thing that is missing, which is right when fixing
+one. `--permissive` answers an unimplemented framework message with nil,
+records it, and carries on -- and because nil is a legitimate answer, most of
+the startup path survives it. One run then enumerates what the whole path
+needs rather than one rebuild per selector.
+
+On Canabalt that is twelve messages, and they carry it eight frames into its
+own code:
+
+```
+  0x0000672c  -[FlxGame initWithState:orientation:backgroundColor:]
+  0x000064ac  -[FlxGame initWithState:orientation:]
+  0x000043bc  -[FlxGlobal init]
+  0x000041ac  +[FlxGlobal sharedFlxGlobal]
+  0x0000317c  -[CanabaltAppDelegate preloadSounds]
+  0x00003460  -[CanabaltAppDelegate applicationDidFinishLaunching:]
+  0x00002550  _main
+  0x00002504  start
+```
+
+That backtrace is the reason the lifter emits a frame note per function under
+`ARC_FRAMES`. A fault in lifted code names an address in the data it touched
+and never the code that touched it, and the host stack is 626 identically
+shaped C functions; without the ring there is nothing to read.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the

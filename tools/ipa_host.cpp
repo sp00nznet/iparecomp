@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "macho_image.h"
+#include "arc_boot.h"
 #include "objc_runtime.h"
 
 namespace {
@@ -35,6 +36,17 @@ void Usage() {
       "              with none, every Objective-C class in the binary is listed,\n"
       "              which is how you discover a title's contract.");
 }
+
+// The generated program installs its own dispatch table, and this tool is
+// built both with and without one. Rather than two builds, the symbol is
+// weak: present when the lifted program is linked in, null when it is not, and
+// the runtime then resolves branches against the shims alone.
+#if defined(__GNUC__)
+extern "C" void arc_install_lifted(uint32_t) __attribute__((weak));
+static void (*ArcInstallLifted())(uint32_t) { return arc_install_lifted; }
+#else
+static void (*ArcInstallLifted())(uint32_t) { return nullptr; }
+#endif
 
 // Where a lifted branch would have gone. Recording it instead of taking it is
 // what lets the dispatch check run in a build with no lifted program.
@@ -59,6 +71,8 @@ std::vector<std::string> ReadContract(const std::string& path) {
 int main(int argc, char** argv) {
   std::string path, arch, contract;
   bool want_objc = false;
+  bool want_run = false;
+  bool permissive = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--help" || a == "-h") { Usage(); return 0; }
@@ -66,6 +80,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--arch=", 0) == 0) arch = a.substr(7);
     else if (a.rfind("--contract=", 0) == 0) contract = a.substr(11);
     else if (a == "--objc") want_objc = true;
+    else if (a == "--run") want_run = true;
+    else if (a == "--permissive") { want_run = true; permissive = true; }
     else path = a;
   }
   if (path.empty()) { Usage(); return 2; }
@@ -215,6 +231,30 @@ int main(int argc, char** argv) {
         std::printf("    %-48s %#010x%s\n", m.selector.c_str(), m.imp,
                     m.from_category ? "  (category)" : "");
     }
+    return 0;
+  }
+
+  // Start the guest. Nothing about this expects to reach a window yet: the
+  // point is that where it stops is a fact rather than a guess, and the trail
+  // it leaves names the next thing to write.
+  if (want_run) {
+    const arc::BootResult r = arc::Boot(img, ArcInstallLifted(), permissive);
+    std::printf("\nshims      %zu imports claimed, %zu still owed\n", r.shims,
+                r.outstanding);
+    std::printf("classrefs  %zu framework class references bound\n",
+                r.bound_classes);
+    std::printf("entry      %#010x\n", r.entry);
+    if (!r.started) {
+      std::printf("did not start: %s\n", r.trap.c_str());
+      return 1;
+    }
+    if (r.trapped) {
+      std::printf("\nstopped: %s\n", r.trap.c_str());
+      arc::ReportTrail(img);
+      return 1;
+    }
+    std::printf("\nthe guest returned from its entry point without trapping\n");
+    arc::ReportTrail(img);
     return 0;
   }
 

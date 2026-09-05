@@ -999,7 +999,15 @@ class Lifter:
 
         lines = [f"/* {self.name(addr)}: {len(order)} instructions, "
                  f"{'thumb' if thumb else 'arm'} */",
-                 f"void {self.name(addr)}(Arm32Ctx* c) {{"]
+                 f"void {self.name(addr)}(Arm32Ctx* c) {{",
+                 # A ring of which guest functions were entered. It costs one
+                 # store per call and only exists under ARC_FRAMES, and it is
+                 # the only backtrace there is: the host stack is tens of
+                 # thousands of identically shaped C functions, and a fault
+                 # names the data it touched rather than the code that touched
+                 # it. A ring rather than a stack, so no return path can miss
+                 # a pop and there is nothing to keep balanced.
+                 f"  arc_frame_note({addr:#010x}u);"]
         complete = True
         for i, a in enumerate(order):
             ins = insns[a]

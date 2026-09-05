@@ -369,6 +369,13 @@ void arc_register_native(uint32_t address, const char* name, ArcNativeFn fn);
 typedef void (*ArcCtxFn)(Arm32Ctx*);
 void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn);
 
+// An import that exists and has no implementation yet. Registering these is
+// what turns "indirect branch to 0x3aee4, neither lifted nor a known import"
+// into the name of the next thing to write. The distinction matters: an
+// unknown address is a bug in the lift, whereas a named unimplemented import
+// is simply work, and the two want telling apart at a glance.
+void arc_register_stub(uint32_t address, const char* name, const char* owner);
+
 // Interworking. `bx`/`blx` select the instruction set from the low bit of the
 // target, so the dispatcher must mask it off to find the function and must not
 // lose it -- a Thumb function lifted as ARM decodes as garbage. The lifted
@@ -401,9 +408,11 @@ void arc_dispatch_miss(Arm32Ctx* c, uint32_t target);
 void arc_msg_send(Arm32Ctx* c);
 
 // --- what the guest was doing ----------------------------------------------
-#if defined(ARC_FRAMES)
+// The library always defines this; ARC_FRAMES only decides whether generated
+// code calls it. One store per lifted call when it is on, nothing when it is
+// not.
 void arc_frame_note(uint32_t packed);
-#else
+#if !defined(ARC_FRAMES)
 #define arc_frame_note(packed) ((void)0)
 #endif
 size_t arc_frame_count(void);

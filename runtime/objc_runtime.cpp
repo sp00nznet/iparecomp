@@ -1,5 +1,7 @@
 #include "objc_runtime.h"
 
+#include "objc_host.h"
+
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -13,6 +15,7 @@ constexpr uint32_t kClassSuper = 4;
 constexpr uint32_t kClassRo = 16;
 // class_ro_t.
 constexpr uint32_t kRoFlags = 0;
+constexpr uint32_t kRoInstanceSize = 8;
 constexpr uint32_t kRoName = 16;
 constexpr uint32_t kRoMethods = 20;
 constexpr uint32_t kRoIsMeta = 0x1;
@@ -26,6 +29,9 @@ constexpr uint32_t kCatClassMethods = 12;
 
 ObjcRuntime g_objc;
 const MachOImage* g_image = nullptr;
+bool g_permissive = false;
+std::vector<std::pair<std::string, std::string>> g_missing;
+std::set<std::string> g_missing_seen;
 
 // Guest pointers are host pointers, but the first 64 KB is deliberately not
 // mapped and a malformed table should be refused rather than dereferenced. So
@@ -81,6 +87,12 @@ std::string ClassNameOf(const std::string& symbol) {
 
 ObjcRuntime& Objc() { return g_objc; }
 
+void SetPermissive(bool on) { g_permissive = on; }
+
+const std::vector<std::pair<std::string, std::string>>& MissingMessages() {
+  return g_missing;
+}
+
 bool ObjcRuntime::ReadClass(const MachOImage& img, uint32_t addr, bool meta) {
   if (!addr || by_addr_.count(addr)) return true;
   const Reader r(img);
@@ -92,6 +104,7 @@ bool ObjcRuntime::ReadClass(const MachOImage& img, uint32_t addr, bool meta) {
   c.isa = r.U32(addr + kClassIsa);
   c.superclass = r.U32(addr + kClassSuper);
   c.name = r.Str(r.U32(ro + kRoName));
+  c.instance_size = r.U32(ro + kRoInstanceSize);
   c.meta = meta || (r.U32(ro + kRoFlags) & kRoIsMeta) != 0;
   if (!c.superclass) {
     // Zero does not mean "root class". It means dyld was going to fill this
@@ -245,6 +258,17 @@ const ObjcClass* ObjcRuntime::ClassAt(uint32_t addr) const {
   return it == by_addr_.end() ? nullptr : &classes_[it->second];
 }
 
+const ObjcClass* ObjcRuntime::Boundary(uint32_t cls) const {
+  const ObjcClass* c = ClassAt(cls);
+  int guard = 0;
+  while (c && c->superclass && guard++ < 64) {
+    const ObjcClass* up = ClassAt(c->superclass);
+    if (!up) break;
+    c = up;
+  }
+  return c;
+}
+
 namespace {
 
 // The selector register holds a pointer to the selector's name. The real
@@ -274,7 +298,37 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     arc_dispatch(c, imp);
     return;
   }
+  // Not in this binary, so a framework owes it. The host class the chain runs
+  // out at is named by the bind table, and its methods are C functions here.
+  if (const ArcCtxFn host = LookupHostMethod(cls, name)) {
+    host(c);
+    return;
+  }
   const ObjcClass* k = g_objc.ClassAt(cls);
+  const char* where = k ? k->name.c_str() : HostClassName(cls);
+  if (!where) {
+    const ObjcClass* b = g_objc.Boundary(cls);
+    if (b && !b->external_super.empty()) where = b->external_super.c_str();
+  }
+  if (g_permissive) {
+    // Nil, and written down. An Objective-C caller is entitled to a nil
+    // answer, so most of the startup path keeps going and the next thing it
+    // needs becomes visible in the same run.
+    const std::string cn = where ? where : "?";
+    const std::string sn = name ? name : "(unreadable selector)";
+    if (g_missing_seen.insert(cn + " " + sn).second)
+      g_missing.emplace_back(cn, sn);
+    ARC_W(c, 0, 0);
+    return;
+  }
+  if (!k) {
+    char msg[256];
+    std::snprintf(msg, sizeof msg, "objc_msgSend: %s does not respond to %s",
+                  where ? where : "an unknown class",
+                  name ? name : "(unreadable selector)");
+    arc_trap(c, msg);
+    return;
+  }
   char msg[256];
   std::snprintf(msg, sizeof msg,
                 "objc_msgSend: %s%s does not respond to %s%s%s",

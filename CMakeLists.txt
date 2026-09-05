@@ -17,6 +17,11 @@ add_library(iparecomp STATIC
   runtime/macho_image.cpp
   runtime/arm32_runtime.c
   runtime/objc_runtime.cpp
+  runtime/arc_mem.cpp
+  runtime/shim_libsystem.cpp
+  runtime/objc_host.cpp
+  runtime/shim_foundation.cpp
+  runtime/arc_boot.cpp
 )
 target_include_directories(iparecomp PUBLIC runtime)
 

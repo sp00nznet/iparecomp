@@ -73,13 +73,20 @@ void arc_trace_clear(void) { t_trace_next = t_trace_seen = 0; }
 static uint32_t t_frames[ARC_FRAME_RING];
 static size_t t_frame_next, t_frame_seen;
 
-#if defined(ARC_FRAMES)
+// The header turns this into a no-op macro when ARC_FRAMES is off, which would
+// otherwise eat the definition below.
+#undef arc_frame_note
+
+// Defined unconditionally, even though the header hides it behind ARC_FRAMES.
+// The flag belongs to whoever is *generating* calls, and that is a different
+// target from this one -- gating the definition on it means a lifted program
+// built with frames cannot link against a library built without, which is
+// exactly the configuration anyone would try first.
 void arc_frame_note(uint32_t packed) {
   t_frames[t_frame_next] = packed;
   t_frame_next = (t_frame_next + 1) % ARC_FRAME_RING;
   ++t_frame_seen;
 }
-#endif
 
 size_t arc_frame_count(void) {
   return t_frame_seen < ARC_FRAME_RING ? t_frame_seen : ARC_FRAME_RING;
@@ -141,6 +148,30 @@ void arc_register_native(uint32_t address, const char* name, ArcNativeFn fn) {
 // r0:r1. Register those through arc_register_ctx_native, which sees the whole
 // context, rather than widening this.
 
+// Imports that exist and have no implementation yet. Kept apart from the
+// natives so a miss can say which of the two kinds it is: a named import with
+// nothing behind it is simply work, whereas an address matching nothing at all
+// is a hole in the lift, and those want telling apart at a glance.
+typedef struct {
+  uint32_t address;
+  const char* name;
+  const char* owner;
+} StubEntry;
+
+#define ARC_MAX_STUBS 1024
+static StubEntry g_stubs[ARC_MAX_STUBS];
+static size_t g_stub_count;
+
+void arc_register_stub(uint32_t address, const char* name, const char* owner) {
+  if (!address || g_stub_count >= ARC_MAX_STUBS) return;
+  for (size_t i = 0; i < g_stub_count; ++i)
+    if (g_stubs[i].address == address) return;
+  g_stubs[g_stub_count].address = address;
+  g_stubs[g_stub_count].name = name;
+  g_stubs[g_stub_count].owner = owner;
+  ++g_stub_count;
+}
+
 static ArcDispatchFn g_dispatch;
 
 void arc_set_dispatch(ArcDispatchFn fn) { g_dispatch = fn; }
@@ -187,7 +218,15 @@ void arc_dispatch_miss(Arm32Ctx* c, uint32_t target) {
                               stack[0], stack[1], stack[2], stack[3]);
     return;
   }
-  char msg[128];
+  char msg[192];
+  for (size_t i = 0; i < g_stub_count; ++i) {
+    if (g_stubs[i].address != addr) continue;
+    arc_trace_note(g_stubs[i].name);
+    snprintf(msg, sizeof(msg), "%s is not implemented -- %s owes it",
+             g_stubs[i].name, g_stubs[i].owner);
+    arc_trap(c, msg);
+    return;
+  }
   snprintf(msg, sizeof(msg),
            "indirect branch to %#x, neither lifted nor a known import", target);
   arc_trap(c, msg);

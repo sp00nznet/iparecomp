@@ -3,14 +3,13 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the game lifts, loads, and dispatches its own messages.** All 626 of
-Canabalt's functions lift to C and the result compiles; 62,421 per-instruction
-and 3,000 whole-function differential cases agree with Unicorn. The image maps
-at its own link address with a zero slide, which is the only place a binary
-carrying no relocations can correctly go. The Objective-C class table is
-realized and `objc_msgSend` dispatches into lifted code. What is missing is the
-framework side: 192 selectors and 205 imports that iOS used to provide, and a
-window. See [Milestones](#milestones).
+**Status: the game runs its own startup code.** All 626 of Canabalt's functions
+lift to C; 62,421 per-instruction and 3,000 whole-function differential cases
+agree with Unicorn. The image maps at its own link address with a zero slide,
+`objc_msgSend` dispatches into lifted code, and the guest now boots as far as
+`-[FlxGame initWithState:orientation:]` before it needs a framework nobody has
+written yet. What is missing is that framework side -- Foundation, UIKit,
+CoreGraphics, OpenGLES -- and a window. See [Milestones](#milestones).
 
 ---
 
@@ -92,6 +91,9 @@ iparecomp is a lifting project from day one.
 | `tools/lift_verify.py` | Differential-tests lifted instructions against Unicorn on encodings harvested from the real binary, with the image mapped at the same address on both sides. |
 | `runtime/objc_runtime` | Realizes the class table out of `__DATA` and answers `objc_msgSend` by selector, dispatching into lifted code. Reports which selectors the binary sends that nothing in it implements -- the framework contract. |
 | `tools/objc_verify.py` | Checks that runtime's realized table against `objc_dump.py`, which reads the same ABI independently. |
+| `runtime/arc_boot` | Starts the guest and says where it stopped: the trap, a backtrace through lifted code, and the trail of calls out to the host. |
+| `runtime/arc_mem` | The guest's heap and stack, below 4 GB, because a 32-bit guest cannot hold a host pointer. |
+| `runtime/objc_host` | Framework classes as real class objects in guest memory, so the guest can hold them, send to them and inherit from them. |
 | `tools/objc_dump.py` | Reads the Objective-C class table straight out of `__DATA` -- classes, methods, selectors, and each method's implementation address. An iOS host contract is a set of classes, and this is how you discover one. |
 | `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
 
@@ -114,6 +116,13 @@ pip install capstone unicorn
 python tools/lifter.py Game.ipa --report          # what still has no emitter
 python tools/lifter.py Game.ipa --out generated/  # the lifted program
 python tools/lift_verify.py Game.ipa              # against Unicorn
+```
+
+Run it, and see where it stops:
+
+```sh
+./build/ipa_host --run path/to/Game         # stop at the first missing piece
+./build/ipa_host --permissive path/to/Game  # answer nil and list them all
 ```
 
 On Windows add `-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake`
@@ -214,11 +223,28 @@ enough to lift in full and check against an emulator.
       518 method pairs; and 88/88 real messages sent through the stub, the
       native table and the runtime arrive at the implementation the table
       names.
-- [ ] **M8 — framework shims.** OpenGLES on desktop GL, UIKit on SDL2,
-      CoreGraphics, OpenAL, AudioToolbox. The work list is now measured on both
-      sides: 205 undefined symbols grouped by owing framework, and 192 of
-      Canabalt's 506 referenced selectors that no class in the binary
-      implements. The other 314 are answered by the game's own lifted code.
+- [ ] **M8 — framework shims.** The scaffolding is in and the game runs on it;
+      the frameworks themselves are the remaining work.
+      - [x] A guest heap and stack below 4 GB, because a 32-bit guest cannot
+            hold a host `malloc` result -- `arc_mem`.
+      - [x] libSystem and libgcc: all 13 symbols Canabalt names.
+      - [x] Host classes with real class objects in guest memory, and the 220
+            framework class references dyld would have bound now bound to them.
+      - [x] `UIApplicationMain` far enough to reach the delegate, and NSObject's
+            `alloc`/`init`/`retain`/`release`/`isKindOfClass:`.
+      - [x] `--run` starts the guest and says where it stopped, with a
+            backtrace through lifted code and the trail of calls out.
+      - [x] `--permissive` answers an unimplemented framework message with nil
+            and writes it down, so one run enumerates the contract instead of
+            one rebuild per selector.
+      - [ ] Foundation, UIKit, CoreGraphics, OpenGLES on desktop GL, OpenAL,
+            AudioToolbox.
+
+      Canabalt currently runs eight frames into its own code -- through
+      `applicationDidFinishLaunching:`, `preloadSounds`, `+[FlxGlobal
+      sharedFlxGlobal]` and into `-[FlxGame initWithState:orientation:]` --
+      and one permissive run names the twelve framework messages that carry it
+      that far.
 - [ ] **M9 — a window.**
 
 ## Ports

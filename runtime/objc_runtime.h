@@ -23,6 +23,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "arm32_context.h"
@@ -50,6 +51,7 @@ struct ObjcClass {
   // exactly when `superclass` is zero and the chain leaves the binary.
   std::string external_super;
   bool meta = false;
+  uint32_t instance_size = 0;  // class_ro_t's instanceSize, for +alloc
   std::vector<ObjcMethod> methods;
 };
 
@@ -73,6 +75,11 @@ class ObjcRuntime {
   uint32_t Lookup(uint32_t cls, const char* selector) const;
 
   const ObjcClass* ClassAt(uint32_t addr) const;
+
+  // Walk up from `cls` to the class whose superclass is not in this binary,
+  // and return it. That is where a lookup runs out and the host takes over,
+  // and its `external_super` names the framework class that must answer.
+  const ObjcClass* Boundary(uint32_t cls) const;
   const std::vector<ObjcClass>& classes() const { return classes_; }
 
   // Selectors the binary sends that nothing in it implements: the framework
@@ -101,6 +108,20 @@ class ObjcRuntime {
 
 // The process-wide runtime the lifted code's `objc_msgSend` reaches.
 ObjcRuntime& Objc();
+
+// Keep going when a framework class has no implementation for a selector,
+// answering nil and writing it down, rather than stopping at the first one.
+//
+// This is a measuring instrument, not a way to run the game. One permissive
+// run enumerates everything the startup path asks a framework for, which is
+// the difference between learning the contract in one pass and learning it one
+// rebuild at a time. Nil is a legitimate answer in Objective-C, so a lot of
+// code survives it -- and where it does not, that is worth knowing too.
+void SetPermissive(bool on);
+
+// Every (class, selector) answered with nil because nothing implemented it,
+// in the order first seen.
+const std::vector<std::pair<std::string, std::string>>& MissingMessages();
 
 // Points the guest's objc_msgSend stubs at this runtime. After this, lifted
 // code that calls objc_msgSend dispatches into other lifted code.
