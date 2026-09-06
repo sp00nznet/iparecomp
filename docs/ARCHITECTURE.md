@@ -704,12 +704,32 @@ argument registers and the first stack words:
       sp0=0x43720000 sp1=0x41800000 sp2=0x80200593
 ```
 
+It prints what came back as well, because a shim returning something
+implausible is the likeliest origin of a bad pointer and only the return value
+shows it:
+
+```
+[ret] localizedStringForKey:value:table: -> 0x20010700
+[ret] CGColor -> 0
+```
+
 A name in the trail says a message was sent. The arguments say whether what it
-carried made sense, which is the difference between watching a value arrive
-wrong and inferring where it went wrong. Four traces narrowed a garbage string
-from "somewhere in text layout" to "already wrong at the top of the chain, and
-never passed in any earlier message" -- which is what rules out the forwarders
-and points at whatever computed it.
+carried made sense, and the returns say where a value came from -- which is the
+difference between watching one arrive wrong and knowing what produced it.
+
+On the text bug that chain of traces established, in order: the bad value is
+already wrong at the top of the forwarding chain; it is passed by no earlier
+message; it is returned by no message at all; and it is not a constant anywhere
+in the image. What is left is memory -- and the instruction that loads it is
+`ldr r5, [r3, r6, lsl #2]` in `-[MenuState init]`, indexing an array of menu
+labels whose third slot was never written. The loop's bound comes from a
+message return two instructions earlier, and the labels come from
+`-[NSBundle localizedStringForKey:value:table:]`, which correctly returns the
+key: the bundle's only `.strings` file belongs to the Settings preferences, not
+to the menu.
+
+So the count and the fill disagree, and the next trace is of the loop that
+fills the array rather than the one that reads it.
 
 ## The shim surface
 

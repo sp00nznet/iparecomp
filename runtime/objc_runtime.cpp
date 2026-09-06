@@ -360,6 +360,7 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   // message was sent; the arguments say whether what it carried made sense,
   // which is the difference between watching a value arrive wrong and
   // inferring where it went wrong. Set to a substring, or "*" for everything.
+  bool tracing = false;
   {
     static const char* filter;
     static bool checked;
@@ -367,7 +368,9 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
       filter = std::getenv("ARC_TRACE_MSG");
       checked = true;
     }
-    if (filter && name && (!*filter || *filter == '*' || strstr(name, filter))) {
+    tracing = filter && name &&
+              (!*filter || *filter == '*' || strstr(name, filter));
+    if (tracing) {
       const ObjcClass* k = g_objc.ClassAt(cls);
       const char* cn = k ? k->name.c_str() : HostClassName(cls);
       const uint32_t sp = ARC_SP(c);
@@ -384,16 +387,19 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     // Registers are already arranged as the guest left them: receiver in r0,
     // selector in r1, arguments after. The implementation is lifted code.
     arc_dispatch(c, imp);
+    if (tracing) std::printf("[ret] %s -> %#x\n", name, ARC_R(c, 0));
     return;
   }
   // Not on the class itself, so a framework owes it -- but a category in this
   // binary may still answer, and that is lifted code, so it goes first.
   if (const uint32_t cat = LookupHostImp(cls, name)) {
     arc_dispatch(c, cat);
+    if (tracing) std::printf("[ret] %s -> %#x\n", name, ARC_R(c, 0));
     return;
   }
   if (const ArcCtxFn host = LookupHostMethod(cls, name)) {
     host(c);
+    if (tracing) std::printf("[ret] %s -> %#x\n", name, ARC_R(c, 0));
     return;
   }
   const ObjcClass* k = g_objc.ClassAt(cls);

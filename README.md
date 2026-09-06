@@ -279,12 +279,15 @@ enough to lift in full and check against an emulator.
       - [x] NSArray and NSMutableArray for real, including fast enumeration,
             because `for (x in array)` is everywhere and an array that stays
             silently empty is a menu with no buttons in it.
-      - [ ] Text layout still stops. A garbage string reaches
-            `-[SSText setText:]` through four `+[FlxText textWithFrame:...]`
-            forwarders -- all of which the harness now covers and all of which
-            pass, so the lifter is not the source. `ARC_TRACE_MSG` shows the
-            value already wrong at the top of the chain and in no earlier
-            message, so whatever computes it is next.
+      - [ ] Text layout still stops, and the search has moved off the lifter.
+            A garbage string reaches `-[SSText setText:]` through four
+            `+[FlxText textWithFrame:...]` forwarders, all of which the harness
+            now covers and all of which pass. `ARC_TRACE_MSG` took it further:
+            passed by no earlier message, returned by no message, and not a
+            constant in the image. It is uninitialised memory --
+            `-[MenuState init]` reads a menu-label array whose third slot was
+            never written, with a loop bound that came from a message return.
+            The count and the fill disagree.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite
