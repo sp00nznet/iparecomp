@@ -25,6 +25,11 @@ namespace arc {
 
 size_t DrainOperations(Arm32Ctx* c);
 
+// Defined below, and called from UIApplicationMain as well as from
+// -[NSRunLoop run]: on a device UIApplicationMain never returns, and an app
+// that expects that never asks for a run loop of its own. Canabalt does not.
+void RunFrameLoop(Arm32Ctx* c);
+
 namespace {
 
 // The device this pretends to be. An iPhone of the era reported its screen in
@@ -186,48 +191,6 @@ void DisplayLinkWithTargetSelector(Arm32Ctx* c) {
 
 void CurrentRunLoop(Arm32Ctx* c) { ARC_W(c, 0, Singleton("NSRunLoop")); }
 
-// -[NSRunLoop run] does not return on a device. Here it must, or there is
-// nothing to report afterwards -- so it ends when the window closes, and the
-// frame count is capped so a run that never draws still finishes.
-void RunLoopRun(Arm32Ctx* c) {
-  if (!WindowIsOpen())
-    WindowOpen(kWindowWidth, kWindowHeight, "Canabalt (iparecomp)");
-  if (!g_link_target || !g_link_selector) {
-    std::printf("run loop: nothing registered a display link\n");
-    ARC_W(c, 0, 0);
-    return;
-  }
-  const char* sel =
-      reinterpret_cast<const char*>(uintptr_t(g_link_selector));
-  const uint32_t cls = ARC_LD32(g_link_target);
-  const uint32_t imp = Objc().Lookup(cls, sel);
-  if (!imp) {
-    std::printf("run loop: nothing implements %s\n", sel ? sel : "?");
-    ARC_W(c, 0, 0);
-    return;
-  }
-  std::printf("run loop: driving %s\n", sel);
-  // Reaching here is the thing the budget was guarding; from now on entering
-  // functions forever is the point.
-  arc_frame_budget(0);
-
-  // Anything queued during launch runs before the first frame, which is where
-  // a device would have got to it too.
-  DrainOperations(c);
-
-  const long kMaxFrames = 100000;
-  long frames = 0;
-  while (WindowIsOpen() && frames < kMaxFrames) {
-    ARC_W(c, 0, g_link_target);
-    ARC_W(c, 1, g_link_selector);
-    arc_dispatch(c, imp);
-    if (!WindowPresent()) break;
-    ++frames;
-  }
-  std::printf("run loop: %ld frames\n", frames);
-  ARC_W(c, 0, 0);
-}
-
 struct Entry {
   const char* cls;
   bool meta;
@@ -326,13 +289,66 @@ const Entry kEntries[] = {
 
     {"NSRunLoop", true, "currentRunLoop", CurrentRunLoop},
     {"NSRunLoop", true, "mainRunLoop", CurrentRunLoop},
-    {"NSRunLoop", false, "run", RunLoopRun},
+    {"NSRunLoop", false, "run", RunFrameLoop},
 
     {"NSNotificationCenter", true, "defaultCenter", NilMethod},
     {"NSValue", true, "valueWithPointer:", NilMethod},
 };
 
 }  // namespace
+
+// -[NSRunLoop run] does not return on a device. Here it must, or there is
+// nothing to report afterwards -- so it ends when the window closes, and the
+// frame count is capped so a run that never draws still finishes.
+void RunFrameLoop(Arm32Ctx* c) {
+  // Once. The guest may ask for a run loop after UIApplicationMain has
+  // already entered one, and a frame loop inside a frame loop is not a
+  // deeper simulation of anything.
+  static bool running = false;
+  if (running) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  running = true;
+
+  if (!WindowIsOpen())
+    WindowOpen(kWindowWidth, kWindowHeight, "Canabalt (iparecomp)");
+  if (!g_link_target || !g_link_selector) {
+    std::printf("run loop: nothing registered a display link\n");
+    ARC_W(c, 0, 0);
+    return;
+  }
+  const char* sel =
+      reinterpret_cast<const char*>(uintptr_t(g_link_selector));
+  const uint32_t cls = ARC_LD32(g_link_target);
+  const uint32_t imp = Objc().Lookup(cls, sel);
+  if (!imp) {
+    std::printf("run loop: nothing implements %s\n", sel ? sel : "?");
+    ARC_W(c, 0, 0);
+    return;
+  }
+  std::printf("run loop: driving %s\n", sel);
+  // Reaching here is the thing the budget was guarding; from now on entering
+  // functions forever is the point.
+  arc_frame_budget(0);
+
+  // Anything queued during launch runs before the first frame, which is where
+  // a device would have got to it too.
+  DrainOperations(c);
+
+  const long kMaxFrames = 100000;
+  long frames = 0;
+  while (WindowIsOpen() && frames < kMaxFrames) {
+    ARC_W(c, 0, g_link_target);
+    ARC_W(c, 1, g_link_selector);
+    arc_dispatch(c, imp);
+    if (!WindowPresent()) break;
+    ++frames;
+  }
+  std::printf("run loop: %ld frames\n", frames);
+  ARC_W(c, 0, 0);
+}
+
 
 // The hierarchy has to be declared before anything else names these classes.
 // HostClass returns an existing class rather than re-parenting one, so

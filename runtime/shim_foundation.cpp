@@ -76,6 +76,12 @@ void IsKindOfClass(Arm32Ctx* c) {
 
 // --- UIApplicationMain -----------------------------------------------------
 
+}  // namespace
+
+void RunFrameLoop(Arm32Ctx* c);
+
+namespace {
+
 uint32_t GuestClassNamed(const char* name) {
   if (!name) return 0;
   for (const auto& k : Objc().classes())
@@ -127,6 +133,13 @@ void UIApplicationMainShim(Arm32Ctx* c) {
   SendSelector(c, delegate, "init", 0);
   const uint32_t inited = ARC_R(c, 0) ? ARC_R(c, 0) : delegate;
   SendSelector(c, inited, "applicationDidFinishLaunching:", app);
+
+  // And then it does not return. On a device UIApplicationMain runs the event
+  // loop for the lifetime of the app, so an app that expects that never asks
+  // for a run loop of its own -- Canabalt registers its CADisplayLink and
+  // returns, and returning from here meant returning from `main` into
+  // `exit(0)` with a fully built menu on screen for no frames at all.
+  RunFrameLoop(c);
   ARC_W(c, 0, 0);
 }
 
