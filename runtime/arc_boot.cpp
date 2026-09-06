@@ -36,13 +36,15 @@ namespace {
 
 // dyld hands `_start` a very specific stack, and `_start` reads all of it
 // before it ever reaches main: argc, then argv with its terminator, then the
-// environment with its terminator, then the apple[] vector. Canabalt's own
-// entry walks the environment looking for the end, so a missing terminator is
-// not a detail -- it is an unbounded loop through whatever follows.
+// environment with its terminator, then the apple[] vector. A guest's own
+// entry may walk the environment looking for the end, so a missing terminator
+// is not a detail -- it is an unbounded loop through whatever follows.
 uint32_t BuildStack(const MachOImage& img) {
   const uint32_t top = arc_guest_stack_top();
-  const uint32_t name = arc_guest_strdup("Canabalt");
-  (void)img;
+  // argv[0] is the binary's own name, taken from the image. It used to be a
+  // string constant naming one game, which is exactly the kind of thing this
+  // library is not supposed to contain.
+  const uint32_t name = arc_guest_strdup(img.name().c_str());
 
   // argc, argv[0], argv terminator, envp terminator, apple terminator.
   const uint32_t words = 5;

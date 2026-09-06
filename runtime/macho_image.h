@@ -128,6 +128,12 @@ class MachOImage {
   // single clearest way to say that something has gone wrong.
   uint32_t slide() const { return slide_; }
   const std::string& arch() const { return arch_; }
+  // The leaf of the path this image was loaded from. The guest's argv[0]:
+  // a binary's own name is a property of the binary, not of the toolkit.
+  std::string name() const {
+    const size_t slash = path_.find_last_of("/\\");
+    return slash == std::string::npos ? path_ : path_.substr(slash + 1);
+  }
   const std::string& error() const { return error_; }
 
   // How many exported functions are Thumb. A binary that is entirely one
@@ -147,7 +153,7 @@ class MachOImage {
   void ParseBindings(const uint8_t* base, uint32_t off, uint32_t size,
                      bool lazy);
 
-  std::string arch_, error_;
+  std::string arch_, error_, path_;
   uint32_t entry_ = 0, slide_ = 0, link_base_ = 0;
   bool encrypted_ = false;
 

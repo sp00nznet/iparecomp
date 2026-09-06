@@ -48,40 +48,29 @@ this repo — that separation is much cheaper to keep than to retrofit.
 The name is the file extension, not the platform. Nothing here uses Apple's
 branding, trademarks, code, headers or SDKs.
 
-## Licence
+## Licence and legal
 
-**MIT.** See [LICENSE](LICENSE) for the full text. Contributions must be your
-own work, offered under the same terms.
+**MIT** — see [LICENSE](LICENSE). Contributions must be your own work, under
+the same terms.
 
-## Legal / content policy
+**Tools only.** No app code, no assets, no extracted art, no publisher
+binaries; `.gitignore` blocks all of it. You bring your own legally obtained
+`.ipa`, and everything here operates on a file you already have. Nothing in
+this repository contains or downloads any part of any application.
 
-**Tools only.** No app code, no app assets, no extracted art, no save data, no
-publisher binaries — `.gitignore` blocks all of it, deliberately. You supply
-your own legally obtained `.ipa`, and everything here operates on a file you
-already have. Nothing in this repository downloads, distributes, or contains
-any part of any application.
+**Not affiliated with Apple.** iOS, iPhone, App Store and FairPlay are Apple
+trademarks. No Apple code, headers, SDKs or branding is used or vendored here
+— the framework surface is reimplemented from observable behaviour, and every
+class and selector name is one the app already contains.
 
-**No Apple code, and no relationship with Apple.** iOS, iPhone, iPad, App
-Store, Xcode, FairPlay and Objective-C are trademarks of Apple Inc. This
-project is not affiliated with, authorised by, endorsed by, or connected to
-Apple in any way. Apple owns iOS and the platform this software targets. No
-Apple source code, headers, SDKs, binaries, branding or documentation is used
-here or vendored here — the framework surface is reimplemented from the
-observable behaviour a binary depends on, and every class and selector name is
-one the app itself already contains.
+**No circumvention.** `ipa_probe.py` detects FairPlay encryption and stops.
+There is no decryption here and none will be accepted.
 
-**No circumvention.** `ipa_probe.py` detects FairPlay encryption and *stops*.
-There is no decryption here and none will be accepted: a binary with
-`cryptid=1` is reported as out of scope, and that is the end of it.
-
-**Why this exists.** The 32-bit iOS catalogue stopped running on any shipping
-device with iOS 11. This is a preservation and educational project about
-static recompilation — how a Mach-O loads, how ARM lifts to C, how a dynamic
-dispatch runtime is answered — aimed at software that no longer runs anywhere.
-
-**If a rights holder wants this taken down, they can have it.** Open an issue
-or contact the maintainer and it will be dealt with in good faith and without
-argument. Nothing here is intended to cause anyone a problem.
+**Why.** The 32-bit iOS catalogue stopped running on any shipping device at
+iOS 11. This is preservation and education — how a Mach-O loads, how ARM lifts
+to C, how dynamic dispatch is answered — aimed at software that runs nowhere.
+If a rights holder wants it taken down, open an issue; it will be honoured in
+good faith.
 
 ## Three things that make this harder than ARM64 Android
 

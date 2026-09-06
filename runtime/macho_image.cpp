@@ -111,6 +111,7 @@ std::string ShortDylib(const std::string& path) {
 }  // namespace
 
 bool MachOImage::Load(const std::string& path, const std::string& want_arch) {
+  path_ = path;
   std::ifstream f(path, std::ios::binary);
   if (!f) { error_ = "cannot open " + path; return false; }
   file_.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
