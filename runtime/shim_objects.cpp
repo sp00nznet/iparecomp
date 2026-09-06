@@ -23,6 +23,11 @@
 #include "objc_runtime.h"
 
 namespace arc {
+
+// Defined below, but named here: a shim inside the anonymous namespace needs
+// it before the definition is reached.
+std::string BundlePath();
+
 namespace {
 
 std::string StringText(uint32_t obj);
@@ -376,10 +381,56 @@ void AddOperation(Arm32Ctx* c) {
 void Nop(Arm32Ctx* c) { ARC_W(c, 0, 0); }
 void SelfMethod(Arm32Ctx*) {}
 
+// --- what text layout asks a string for ------------------------------------
+
+// -getCharacters: copies UTF-16 code units into a buffer the caller sized from
+// -length. The strings here are ASCII, so this is a widening copy; anything
+// outside it would need real UTF-8 decoding and would show up as the wrong
+// glyph rather than a crash.
+void GetCharacters(Arm32Ctx* c) {
+  const std::string text = StringText(ARC_R(c, 0));
+  const uint32_t out = ARC_R(c, 2);
+  if (!out) return;
+  for (size_t i = 0; i < text.size(); ++i)
+    ARC_ST16(out + uint32_t(i) * 2, uint16_t(uint8_t(text[i])));
+  ARC_W(c, 0, 0);
+}
+
+void CharacterAtIndex(Arm32Ctx* c) {
+  const std::string text = StringText(ARC_R(c, 0));
+  const uint32_t i = ARC_R(c, 2);
+  ARC_W(c, 0, i < text.size() ? uint32_t(uint8_t(text[i])) : 0);
+}
+
+// NSNotFound. A search that finds nothing has to say so with this exact value:
+// zero means "found at the start", and a word-wrapping loop handed that
+// forever does not terminate. This is what the permissive budget caught.
+constexpr uint32_t kNotFound = 0x7FFFFFFF;
+
+// -rangeOfCharacterFromSet:options:range: returns an NSRange -- two words,
+// small enough to come back in r0 and r1 rather than through a hidden pointer.
+void RangeOfCharacterFromSet(Arm32Ctx* c) {
+  const std::string text = StringText(ARC_R(c, 0));
+  // The only set anything here asks for is the newline set, so this looks for
+  // one rather than modelling NSCharacterSet.
+  const size_t at = text.find_first_of("\n\r");
+  if (at == std::string::npos) {
+    ARC_W(c, 0, kNotFound);
+    ARC_W(c, 1, 0);
+    return;
+  }
+  ARC_W(c, 0, uint32_t(at));
+  ARC_W(c, 1, 1);
+}
+
+void NewlineCharacterSet(Arm32Ctx* c) {
+  ARC_W(c, 0, HostAllocInstance(HostClass("NSCharacterSet", "NSObject")));
+}
+
 // The bundle's resources are wherever the host was started from. A real path
 // beats a plausible one: anything that opens it succeeds or fails honestly
 // instead of failing later for a reason that looks unrelated.
-void ResourcePath(Arm32Ctx* c) { ARC_W(c, 0, MakeString(".")); }
+void ResourcePath(Arm32Ctx* c);
 
 void ValueWithPointer(Arm32Ctx* c) {
   const uint32_t obj = HostAllocInstance(HostClass("NSValue", "NSObject"));
@@ -532,6 +583,14 @@ const Entry kEntries[] = {
     {"NSMutableArray", true, "array", Nop},
     {"NSMutableArray", false, "addObject:", Nop},
     {"NSMutableArray", false, "count", Nop},
+
+    {"NSString", false, "getCharacters:", GetCharacters},
+    {"NSString", false, "characterAtIndex:", CharacterAtIndex},
+    {"NSString", false, "rangeOfCharacterFromSet:options:range:",
+     RangeOfCharacterFromSet},
+    {"NSString", false, "rangeOfCharacterFromSet:", RangeOfCharacterFromSet},
+    {"NSCharacterSet", true, "newlineCharacterSet", NewlineCharacterSet},
+    {"NSCharacterSet", true, "whitespaceCharacterSet", NewlineCharacterSet},
 };
 
 struct CImport {
@@ -573,6 +632,24 @@ size_t DrainOperations(Arm32Ctx* c) {
   }
   return ran;
 }
+
+// The one string reader, shared. Anything holding text -- a literal the
+// compiler emitted or a string a shim made -- is read the same way, and the
+// image loader needs it to turn `imageNamed:` into a filename.
+std::string GuestStringText(uint32_t obj) { return StringText(obj); }
+
+namespace {
+void ResourcePath(Arm32Ctx* c) { ARC_W(c, 0, MakeString(BundlePath())); }
+}  // namespace
+
+// Where the .app's resources are. Set by the host, because only it knows.
+std::string& BundlePathRef() {
+  static std::string path = ".";
+  return path;
+}
+
+std::string BundlePath() { return BundlePathRef(); }
+void SetBundlePath(const std::string& p) { BundlePathRef() = p; }
 
 size_t InstallFoundationCImports(const MachOImage& img) {
   size_t claimed = 0;

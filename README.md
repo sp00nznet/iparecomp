@@ -257,12 +257,22 @@ enough to lift in full and check against an emulator.
       - [x] CoreGraphics geometry, written out exactly -- empty rectangles
             compare equal, containment is half-open, an inset past the middle
             is the null rect.
-      - [ ] CoreGraphics fonts and images, which is where it stops now:
-            `CGFontRetain` in `-[SSFont initWithSize:]`.
+      - [x] Images: the bundle's 73 PNGs decoded with libpng, the bitmap
+            context the game composes textures in, and the blit into it that
+            `glTexImage2D` then uploads.
+      - [x] `--bundle` so resources resolve, and a function budget so a guest
+            that never reaches the frame loop reports where it was going round
+            instead of hanging.
+      - [ ] CoreGraphics *fonts*, which is where it stops now. The metrics are
+            currently a stub, and stub metrics do not merely draw nothing --
+            they hang: `-[SSText(Private) nextWrapOffsetForGlyphs:]` word-wraps
+            by asking how many glyphs fit, and an invented advance either fits
+            nothing or divides by nothing. FreeType is the answer and Nokia.ttf
+            is in the bundle.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading and sprite
-      construction, and into font loading -- 80 imports answered, 67 to go.
+      construction, and into text layout -- **113 imports answered, 34 to go**.
       It prints its own diagnostics along the way, because `NSLog` works:
 
       ```

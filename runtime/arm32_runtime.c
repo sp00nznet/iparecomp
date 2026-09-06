@@ -82,10 +82,25 @@ static size_t t_frame_next, t_frame_seen;
 // target from this one -- gating the definition on it means a lifted program
 // built with frames cannot link against a library built without, which is
 // exactly the configuration anyone would try first.
+static long g_frame_budget = 0;
+static long g_frame_budget_start = 0;
+
+void arc_frame_budget(long entries) {
+  g_frame_budget = entries;
+  g_frame_budget_start = entries;
+}
+
+void arc_frame_budget_reset(void) { g_frame_budget = g_frame_budget_start; }
+
 void arc_frame_note(uint32_t packed) {
   t_frames[t_frame_next] = packed;
   t_frame_next = (t_frame_next + 1) % ARC_FRAME_RING;
   ++t_frame_seen;
+  if (g_frame_budget && --g_frame_budget <= 0) {
+    g_frame_budget = 0;
+    arc_trap(0, "the guest entered its function budget without reaching the "
+                "frame loop; it is going round somewhere below");
+  }
 }
 
 size_t arc_frame_count(void) {
@@ -115,12 +130,25 @@ static size_t g_native_count;
 
 typedef struct { uint32_t address; const char* name; ArcCtxFn fn; } CtxNative;
 
-#define ARC_MAX_CTX_NATIVES 64
+// Sized for a whole framework surface, not a handful of special cases. The
+// first version held 64 and filled up silently: the GL shims alone are 35, and
+// once the table was full `objc_msgSend` registered as a no-op and the guest
+// reported it as unimplemented -- with every one of its own classes still
+// loading correctly, so the symptom pointed nowhere near the cause. A limit
+// that is reached quietly is worse than one that is too small.
+#define ARC_MAX_CTX_NATIVES 1024
 static CtxNative g_ctx_natives[ARC_MAX_CTX_NATIVES];
 static size_t g_ctx_native_count;
 
 void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn) {
-  if (!address || g_ctx_native_count >= ARC_MAX_CTX_NATIVES) return;
+  if (g_ctx_native_count >= ARC_MAX_CTX_NATIVES) {
+    fprintf(stderr,
+            "arc: the context-native table is full at %d; '%s' and "
+            "everything after it is unreachable\n",
+            ARC_MAX_CTX_NATIVES, name ? name : "?");
+    return;
+  }
+  if (!address) return;
   for (size_t i = 0; i < g_ctx_native_count; ++i)
     if (g_ctx_natives[i].address == address) return;
   g_ctx_natives[g_ctx_native_count].address = address;

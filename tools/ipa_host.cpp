@@ -69,10 +69,16 @@ std::vector<std::string> ReadContract(const std::string& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Line-buffered, because the interesting runs are the ones that do not
+  // return -- a frame loop, or something stuck -- and a full buffer discards
+  // exactly the output that would say which.
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
   std::string path, arch, contract;
   bool want_objc = false;
   bool want_run = false;
   bool permissive = false;
+  std::string bundle;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--help" || a == "-h") { Usage(); return 0; }
@@ -82,6 +88,7 @@ int main(int argc, char** argv) {
     else if (a == "--objc") want_objc = true;
     else if (a == "--run") want_run = true;
     else if (a == "--permissive") { want_run = true; permissive = true; }
+    else if (a.rfind("--bundle=", 0) == 0) bundle = a.substr(9);
     else path = a;
   }
   if (path.empty()) { Usage(); return 2; }
@@ -238,13 +245,15 @@ int main(int argc, char** argv) {
   // point is that where it stops is a fact rather than a guess, and the trail
   // it leaves names the next thing to write.
   if (want_run) {
+    // Resources live beside the binary unless told otherwise, which is how an
+    // extracted .app is laid out.
+    if (bundle.empty()) {
+      const size_t slash = path.find_last_of("/\\");
+      bundle = slash == std::string::npos ? std::string(".") : path.substr(0, slash);
+    }
+    arc::SetBundlePath(bundle);
+    std::printf("bundle     %s\n", bundle.c_str());
     const arc::BootResult r = arc::Boot(img, ArcInstallLifted(), permissive);
-    std::printf("\nshims      %zu imports claimed, %zu still owed\n", r.shims,
-                r.outstanding);
-    std::printf("classrefs  %zu bound, %zu pointer slots filled, "
-                "%zu imports given a synthetic address\n",
-                r.bound_classes, r.bound_slots, r.synthetic);
-    std::printf("entry      %#010x\n", r.entry);
     if (!r.started) {
       std::printf("did not start: %s\n", r.trap.c_str());
       return 1;

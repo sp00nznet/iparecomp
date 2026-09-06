@@ -381,6 +381,17 @@ void arc_register_stub(uint32_t address, const char* name, const char* owner);
 // then names every missing import as well as every missing message, instead of
 // one rebuild per symbol.
 void arc_set_permissive(int on);
+
+// A guest that never finishes reports nothing, which during bring-up is the
+// least useful outcome there is. Every lifted function entry counts against a
+// budget; exhausting it traps, so the frame ring and the call trail survive
+// and say where it was going round.
+//
+// The frame loop resets it, because a game that is running is *supposed* to
+// enter functions forever -- the budget is about reaching the loop, not about
+// staying in it.
+void arc_frame_budget(long entries);
+void arc_frame_budget_reset(void);
 size_t arc_missing_count(void);
 const char* arc_missing_at(size_t i);
 

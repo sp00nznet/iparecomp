@@ -26,6 +26,7 @@ add_library(iparecomp STATIC
   runtime/shim_gl.cpp
   runtime/shim_audio.cpp
   runtime/shim_coregraphics.cpp
+  runtime/shim_image.cpp
   runtime/window.cpp
   runtime/arc_boot.cpp
 )
@@ -33,6 +34,32 @@ target_include_directories(iparecomp PUBLIC runtime)
 
 if(WIN32)
   target_link_libraries(iparecomp PUBLIC ws2_32)
+endif()
+
+# Decoding a PNG is the last place to be inventive, and libpng is already
+# here. Without it the bundle's 73 images cannot be read and the game runs
+# with nothing on screen.
+find_package(PNG QUIET)
+if(NOT PNG_FOUND)
+  # CMake's own finder only looks in the system prefixes, which on an MSYS2 or
+  # Homebrew toolchain is not where libpng is. pkg-config knows.
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PNG_PC QUIET libpng)
+  endif()
+endif()
+if(PNG_FOUND)
+  target_link_libraries(iparecomp PUBLIC PNG::PNG)
+  target_compile_definitions(iparecomp PUBLIC ARC_HAVE_PNG)
+  message(STATUS "iparecomp: libpng found -- bundle images will load")
+elseif(PNG_PC_FOUND)
+  target_include_directories(iparecomp PUBLIC ${PNG_PC_INCLUDE_DIRS})
+  target_link_libraries(iparecomp PUBLIC ${PNG_PC_LIBRARIES})
+  target_link_directories(iparecomp PUBLIC ${PNG_PC_LIBRARY_DIRS})
+  target_compile_definitions(iparecomp PUBLIC ARC_HAVE_PNG)
+  message(STATUS "iparecomp: libpng ${PNG_PC_VERSION} via pkg-config")
+else()
+  message(STATUS "iparecomp: no libpng -- images cannot be decoded")
 endif()
 
 find_package(ZLIB QUIET)

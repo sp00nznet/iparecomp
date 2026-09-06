@@ -24,6 +24,8 @@ size_t InstallGlShims(const MachOImage& img);
 size_t InstallAudioShims(const MachOImage& img);
 size_t InstallFoundationCImports(const MachOImage& img);
 size_t InstallCoreGraphicsShims(const MachOImage& img);
+size_t InstallImageShims(const MachOImage& img);
+void SetBundlePath(const std::string& p);
 
 namespace {
 
@@ -96,6 +98,7 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   r.shims += InstallAudioShims(img);
   r.shims += InstallFoundationCImports(img);
   r.shims += InstallCoreGraphicsShims(img);
+  r.shims += InstallImageShims(img);
   if (Objc().Init(img)) InstallObjcRuntime(img);
   // Host classes first, then the bind sites that point at them. Without this
   // every __objc_classrefs slot reads zero, and a message to nil is answered
@@ -130,6 +133,17 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
     return r;
   }
 
+  // Said before the guest starts, not after it finishes. A run that reaches
+  // the frame loop does not finish, and printing the setup afterwards means
+  // the most useful numbers are the ones you never see.
+  std::printf("shims      %zu imports claimed, %zu still owed\n", r.shims,
+              r.outstanding);
+  std::printf("classrefs  %zu bound, %zu pointer slots filled, "
+              "%zu imports given a synthetic address\n",
+              r.bound_classes, r.bound_slots, r.synthetic);
+  std::printf("entry      %#010x\n\n", r.entry);
+  std::fflush(stdout);
+
   Arm32Ctx ctx;
   std::memset(&ctx, 0, sizeof ctx);
   ctx.image_base = img.link_base();
@@ -141,6 +155,9 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
 
   arc_trace_clear();
   arc_frame_clear();
+  // Generous: the launch path enters a few hundred thousand functions, and a
+  // real frame loop resets this on its first pass.
+  arc_frame_budget(40000000);
 
   std::jmp_buf recovery;
   arc_set_recovery(&recovery);

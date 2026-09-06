@@ -40,6 +40,10 @@ struct BootResult {
 BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
                 bool permissive = false);
 
+// Where the .app's resources are. Images and any file the guest opens are
+// resolved from here.
+void SetBundlePath(const std::string& path);
+
 // What the guest was doing, most recent first. Safe to call after a trap.
 void ReportTrail(const MachOImage& img);
 

@@ -177,6 +177,9 @@ void RunLoopRun(Arm32Ctx* c) {
     return;
   }
   std::printf("run loop: driving %s\n", sel);
+  // Reaching here is the thing the budget was guarding; from now on entering
+  // functions forever is the point.
+  arc_frame_budget(0);
 
   // Anything queued during launch runs before the first frame, which is where
   // a device would have got to it too.

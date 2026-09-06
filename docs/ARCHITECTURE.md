@@ -526,6 +526,50 @@ a loop whose exit condition depends on the answer will not terminate if the
 answer is always nil. A measuring run that never ends measures nothing, so
 there is a budget on it, and reaching that budget is reported as what it is.
 
+### A stub that hangs is worse than one that is wrong
+
+Font metrics are the clearest case of it. `CGFontGetGlyphAdvances` has to write
+an advance per glyph, and a plausible-looking half-em was the obvious stand-in.
+It hung the game: `-[SSText(Private) nextWrapOffsetForGlyphs:]` word-wraps by
+asking how many glyphs fit in the line, could not fit even one, and never moved
+the offset.
+
+Zero advances terminate -- everything fits, the loop ends on its first pass,
+and the text is invisible, which it is anyway without a rasteriser. That is
+still not enough, because the layout above it loops on the font's own size, and
+the honest conclusion is that text needs FreeType rather than a better guess.
+
+The general rule this produced: when a shim's return value feeds a loop's exit
+condition, the safe stub is the one that ends the loop, not the one that looks
+most like a real answer.
+
+### A run that does not finish reports nothing
+
+Which is why every lifted function entry counts against a budget. Exhausting it
+traps, so the frame ring survives and names what was going round -- and the
+frame loop resets it, because a running game is supposed to enter functions
+forever. The budget is about *reaching* the loop, not about staying in it.
+
+It paid for itself immediately:
+
+```
+stopped: the guest entered its function budget without reaching the frame loop
+  0x00020fc8  -[SSText padding]
+  0x00020abc  -[SSFont size]
+  0x00021824  -[SSText(Private) nextWrapOffsetForGlyphs:]
+```
+
+### A table that fills up quietly
+
+`objc_msgSend` reported itself unimplemented while every one of the binary's
+own classes still loaded correctly -- a symptom pointing nowhere near its
+cause. The context-native table held 64 entries, the GL shims alone are 35, and
+once it was full every later registration silently did nothing.
+
+The fix is the size, but the lesson is the silence: a capacity limit that is
+reached without saying so converts an ordinary mistake into an unrelated
+mystery. It is loud now.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the
