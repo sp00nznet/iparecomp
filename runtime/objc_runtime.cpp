@@ -336,7 +336,17 @@ void NoteMessage(uint32_t cls, const char* selector) {
 void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   // A message to nil is not an error: it evaluates to zero and that is load
   // bearing in real Objective-C, not a corner case.
+  //
+  // It is also invisible, which is the problem. A frame that does nothing at
+  // all looks the same whether the work was skipped or never asked for, and
+  // `for (x in nil)` is zero iterations with no message anyone can see. So
+  // under ARC_TRACE_MSG the nil sends are traced too, marked as such.
   if (!receiver) {
+    if (const char* env = std::getenv("ARC_TRACE_MSG")) {
+      const char* name = SelName(sel);
+      if (name && (!*env || *env == '*' || strstr(name, env)))
+        std::printf("[nil] %s\n", name);
+    }
     ARC_W(c, 0, 0);
     return;
   }

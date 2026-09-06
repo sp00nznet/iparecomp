@@ -304,6 +304,28 @@ void SetObjectForKey(Arm32Ctx* c) {
   ARC_W(c, 0, 0);
 }
 
+// Every host class was being created with NSObject as its superclass, which
+// makes the hierarchy decoration rather than structure. A method lookup that
+// misses walks the superclass chain, so a flat hierarchy means NSMutableArray
+// answers nothing NSArray implements -- count, objectAtIndex:, lastObject,
+// the fast enumeration -- and the guest is told the class does not respond to
+// `count`. These are the pairs where the real hierarchy carries methods; the
+// default stays NSObject.
+const char* HostSuperOf(const char* cls) {
+  static const struct {
+    const char* cls;
+    const char* super;
+  } kSupers[] = {
+      {"NSMutableArray", "NSArray"},
+      {"NSMutableDictionary", "NSDictionary"},
+      {"NSMutableString", "NSString"},
+      {"NSMutableData", "NSData"},
+  };
+  for (const auto& k : kSupers)
+    if (std::strcmp(cls, k.cls) == 0) return k.super;
+  return "NSObject";
+}
+
 // --- arrays ----------------------------------------------------------------
 // Real ones, because the game keeps score lists and sprite groups in them and
 // reads them back. An array that silently stays empty is a menu with no
@@ -315,7 +337,7 @@ std::map<uint32_t, std::vector<uint32_t>>& Arrays() {
 }
 
 uint32_t MakeArray(const char* cls) {
-  const uint32_t obj = HostAllocInstance(HostClass(cls, "NSObject"));
+  const uint32_t obj = HostAllocInstance(HostClass(cls, HostSuperOf(cls)));
   if (obj) Arrays()[obj];
   return obj;
 }
@@ -835,15 +857,11 @@ const Entry kEntries[] = {
     {"NSArray", true, "arrayWithObjects:", ArrayWithObjects},
     {"NSArray", true, "arrayWithArray:", ArrayWithArray},
     {"NSArray", false, "initWithArray:", ArrayInitWithArray},
-    {"NSMutableArray", true, "arrayWithArray:", ArrayWithArray},
-    {"NSMutableArray", false, "initWithArray:", ArrayInitWithArray},
     {"NSArray", false, "count", ArrayCount},
     {"NSArray", false, "objectAtIndex:", ArrayObjectAtIndex},
     {"NSArray", false, "lastObject", ArrayLastObject},
     {"NSArray", false, "containsObject:", ArrayContains},
     {"NSArray", false, "countByEnumeratingWithState:objects:count:",
-     CountByEnumerating},
-    {"NSMutableArray", false, "countByEnumeratingWithState:objects:count:",
      CountByEnumerating},
     {"NSMutableArray", true, "array", ArrayNew},
     {"NSMutableArray", true, "arrayWithCapacity:", ArrayNew},
@@ -955,7 +973,7 @@ size_t InstallFoundationCImports(const MachOImage& img) {
 
 void InstallObjectShims() {
   for (const auto& e : kEntries) {
-    HostClass(e.cls, "NSObject");
+    HostClass(e.cls, HostSuperOf(e.cls));
     HostMethod(e.cls, e.meta, e.sel, e.fn);
   }
 }

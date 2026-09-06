@@ -10,7 +10,9 @@
 // is four floats, which is too big to return in a register, so `-bounds` comes
 // through objc_msgSend_stret with a hidden pointer in r0 -- and the same rect
 // passed *in* occupies four argument words. Both directions are here.
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -176,6 +178,88 @@ void PresentRenderbuffer(Arm32Ctx* c) {
   ARC_W(c, 0, 1);
 }
 
+// --- animations ------------------------------------------------------------
+// A UIView animation block is a delegate, a selector and a duration, and the
+// part that matters here is that the selector runs -- eventually, and not
+// before. Canabalt's splash fade ends in
+// `-[FlxGame fadeDefaultViewAnimation:finished:context:]`, which sets
+// `logoComplete`; until that is set, `gameLoop` clears the screen, presents
+// it, and does nothing else. A frame loop that runs perfectly and draws
+// nothing looks exactly like a broken renderer.
+//
+// Running the completion inline at `commitAnimations` was the first attempt
+// and it was wrong for the same reason inline NSOperations were: the
+// animation is asynchronous, so the callback landed *before*
+// `-[FlxGame initWithState:orientation:backgroundColor:]`, which zeroes
+// `logoComplete` on the way past. Setting a flag and then having the object
+// that owns it constructed afterwards is not a race the real order has.
+//
+// So the completion waits out its own duration and fires from the frame loop.
+// Nothing here interpolates a view property -- the splash image is never
+// drawn -- but the clock is the thing that keeps the ordering honest, and it
+// is also the knob to turn if a title's timing needs it.
+struct Animation {
+  uint32_t delegate = 0, stop_sel = 0, id = 0, context = 0;
+  double duration = 0;
+};
+
+Animation g_anim;                 // the block being built
+Animation g_pending;              // committed, waiting for its clock
+std::chrono::steady_clock::time_point g_pending_due;
+bool g_has_pending = false;
+
+void BeginAnimations(Arm32Ctx* c) {
+  g_anim = Animation();
+  g_anim.id = ARC_R(c, 2);
+  g_anim.context = ARC_R(c, 3);
+}
+
+// The duration is a double in r2/r3 under softfp.
+void SetAnimationDuration(Arm32Ctx* c) {
+  const uint64_t bits = uint64_t(ARC_R(c, 2)) | (uint64_t(ARC_R(c, 3)) << 32);
+  double d;
+  std::memcpy(&d, &bits, 8);
+  g_anim.duration = (d > 0 && d < 60) ? d : 0;
+}
+
+void SetAnimationDelegate(Arm32Ctx* c) { g_anim.delegate = ARC_R(c, 2); }
+void SetAnimationDidStopSelector(Arm32Ctx* c) { g_anim.stop_sel = ARC_R(c, 2); }
+
+void CommitAnimations(Arm32Ctx* c) {
+  if (g_anim.delegate && g_anim.stop_sel) {
+    g_pending = g_anim;
+    g_pending_due = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(g_anim.duration));
+    g_has_pending = true;
+  }
+  g_anim = Animation();
+  ARC_W(c, 0, 0);
+}
+
+// animationDidStop:(NSString*)id finished:(NSNumber*)finished context:(void*)
+void RunDueAnimations(Arm32Ctx* c) {
+  if (!g_has_pending || std::chrono::steady_clock::now() < g_pending_due)
+    return;
+  const Animation a = g_pending;
+  g_has_pending = false;
+  const char* name = reinterpret_cast<const char*>(uintptr_t(a.stop_sel));
+  const uint32_t imp = Objc().Lookup(ARC_LD32(a.delegate), name);
+  if (std::getenv("ARC_TRACE_MSG"))
+    std::printf("[anim] %s on %#x -> %#x\n", name ? name : "?", a.delegate,
+                imp);
+  if (!imp) return;
+  const uint32_t sp = ARC_SP(c);
+  ARC_W(c, 13, sp - 16);
+  ARC_ST32(ARC_SP(c), a.context);
+  ARC_W(c, 0, a.delegate);
+  ARC_W(c, 1, a.stop_sel);
+  ARC_W(c, 2, a.id);
+  ARC_W(c, 3, 1);  // finished: YES, because it did
+  arc_dispatch(c, imp);
+  ARC_W(c, 13, sp);
+}
+
 // --- the frame loop --------------------------------------------------------
 
 uint32_t g_link_target = 0;
@@ -216,11 +300,14 @@ const Entry kEntries[] = {
     {"UIView", false, "layer", Layer},
     {"UIView", false, "setMultipleTouchEnabled:", NilMethod},
     {"UIView", false, "setUserInteractionEnabled:", NilMethod},
-    {"UIView", true, "beginAnimations:context:", NilMethod},
-    {"UIView", true, "setAnimationDuration:", NilMethod},
-    {"UIView", true, "setAnimationDelegate:", NilMethod},
-    {"UIView", true, "setAnimationDidStopSelector:", NilMethod},
-    {"UIView", true, "commitAnimations", NilMethod},
+    {"UIView", true, "beginAnimations:context:", BeginAnimations},
+    {"UIView", true, "setAnimationDuration:", SetAnimationDuration},
+    {"UIView", true, "setAnimationDelay:", NilMethod},
+    {"UIView", true, "setAnimationCurve:", NilMethod},
+    {"UIView", true, "setAnimationDelegate:", SetAnimationDelegate},
+    {"UIView", true, "setAnimationDidStopSelector:",
+     SetAnimationDidStopSelector},
+    {"UIView", true, "commitAnimations", CommitAnimations},
 
     // The ordinary view properties. A game sets these on things it is about
     // to draw itself with GL, so accepting and ignoring them is not a
@@ -336,9 +423,20 @@ void RunFrameLoop(Arm32Ctx* c) {
   // a device would have got to it too.
   DrainOperations(c);
 
-  const long kMaxFrames = 100000;
+  // A run that does not finish reports nothing, and a frame loop is by
+  // construction a run that does not finish. `ARC_MAX_FRAMES=n` bounds it, so
+  // "does it draw thirty frames without trapping" is a question that can be
+  // asked without a person watching a window.
+  long limit = 100000;
+  if (const char* env = std::getenv("ARC_MAX_FRAMES")) {
+    const long n = std::strtol(env, nullptr, 10);
+    if (n > 0) limit = n;
+  }
   long frames = 0;
-  while (WindowIsOpen() && frames < kMaxFrames) {
+  while (WindowIsOpen() && frames < limit) {
+    // Anything whose duration has run out fires before the frame that would
+    // have seen its effect.
+    RunDueAnimations(c);
     ARC_W(c, 0, g_link_target);
     ARC_W(c, 1, g_link_selector);
     arc_dispatch(c, imp);
