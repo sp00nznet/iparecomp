@@ -50,6 +50,10 @@ struct BitmapContext {
   uint32_t data = 0;
   int width = 0, height = 0;
   int bytes_per_row = 0;
+  // The current transform, translate and scale only, which is all any of this
+  // is asked for. A point drawn at (x, y) lands at (tx + sx*x, ty + sy*y),
+  // still in CoreGraphics' bottom-left space.
+  float sx = 1, sy = 1, tx = 0, ty = 0;
 };
 
 std::map<uint32_t, BitmapContext>& Contexts() {
@@ -281,6 +285,39 @@ const ObjcShim kObjc[] = {
 };
 
 }  // namespace
+
+// The context's transform, for whoever draws into it. Ignoring this put every
+// glyph ten rows too high: Canabalt sets up `translate(0, 2);
+// translate(0, 30); scale(1, -1)` so it can lay text out top-down, and text
+// drawn at y=21 in that space belongs at y=11 from the bottom, not 21. The
+// tops of the letters fell outside the bitmap, and ABOUT came out as HDOUC.
+bool BitmapContextTransform(uint32_t handle, float* sx, float* sy, float* tx,
+                            float* ty) {
+  auto it = Contexts().find(handle);
+  if (it == Contexts().end()) return false;
+  if (sx) *sx = it->second.sx;
+  if (sy) *sy = it->second.sy;
+  if (tx) *tx = it->second.tx;
+  if (ty) *ty = it->second.ty;
+  return true;
+}
+
+// CGContextTranslateCTM(c, dx, dy) displaces the origin, so a later point goes
+// through the old transform *after* the displacement: the translation moves by
+// the current scale, and the scale is unchanged.
+void BitmapContextTranslate(uint32_t handle, float dx, float dy) {
+  auto it = Contexts().find(handle);
+  if (it == Contexts().end()) return;
+  it->second.tx += it->second.sx * dx;
+  it->second.ty += it->second.sy * dy;
+}
+
+void BitmapContextScale(uint32_t handle, float kx, float ky) {
+  auto it = Contexts().find(handle);
+  if (it == Contexts().end()) return;
+  it->second.sx *= kx;
+  it->second.sy *= ky;
+}
 
 // The bitmap context, for whoever else draws into it -- the font shims
 // rasterise glyphs straight into the same buffer the game is about to upload.

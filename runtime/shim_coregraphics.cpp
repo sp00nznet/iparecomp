@@ -18,6 +18,9 @@
 #include "macho_image.h"
 
 namespace arc {
+void BitmapContextTranslate(uint32_t handle, float dx, float dy);
+void BitmapContextScale(uint32_t handle, float kx, float ky);
+
 namespace {
 
 uint32_t A(Arm32Ctx* c, int i) {
@@ -146,6 +149,17 @@ void AffineTranslate(Arm32Ctx* c) {
 // out of the bundle's own Nokia.ttf through FreeType.
 void Nothing(Arm32Ctx* c) { ARC_W(c, 0, 0); }
 
+// The CTM is real, because text placement goes through it. Only translate and
+// scale, because that is all the guest uses -- a rotation would need the full
+// matrix, and this says so rather than silently ignoring one.
+void ContextTranslateCTM(Arm32Ctx* c) {
+  BitmapContextTranslate(ARC_R(c, 0), Af(c, 1), Af(c, 2));
+}
+
+void ContextScaleCTM(Arm32Ctx* c) {
+  BitmapContextScale(ARC_R(c, 0), Af(c, 1), Af(c, 2));
+}
+
 struct Shim {
   const char* name;
   ArcCtxFn fn;
@@ -163,8 +177,8 @@ const Shim kShims[] = {
     {"_CGContextSetTextDrawingMode", Nothing},
     {"_CGContextSetFillColorWithColor", Nothing},
     {"_CGContextSetShadowWithColor", Nothing},
-    {"_CGContextTranslateCTM", Nothing},
-    {"_CGContextScaleCTM", Nothing},
+    {"_CGContextTranslateCTM", ContextTranslateCTM},
+    {"_CGContextScaleCTM", ContextScaleCTM},
     {"_CGContextConcatCTM", Nothing},
     {"_CGColorGetComponents", Nothing},
     {"_CGColorGetNumberOfComponents", Nothing},

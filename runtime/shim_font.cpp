@@ -34,6 +34,8 @@ namespace arc {
 
 bool BitmapContextInfo(uint32_t handle, uint32_t* data, int* width, int* height,
                        int* stride);
+bool BitmapContextTransform(uint32_t handle, float* sx, float* sy, float* tx,
+                            float* ty);
 std::string BundlePath();
 
 namespace {
@@ -229,10 +231,33 @@ void ShowGlyphsAtPoint(Arm32Ctx* c) {
                 A(c, 0), data, bw, bh, stride, Af(c, 1), Af(c, 2), A(c, 4),
                 double(g_font_size));
 
-  const float px = Af(c, 1), py = Af(c, 2);
+  // Through the context's transform: the guest lays text out top-down and
+  // flips the context to suit, so the point it names is not where the glyph
+  // goes until that flip is applied.
+  float sx = 1, sy = 1, tx = 0, ty = 0;
+  BitmapContextTransform(A(c, 0), &sx, &sy, &tx, &ty);
+  const float px = tx + sx * Af(c, 1), py = ty + sy * Af(c, 2);
   const uint32_t glyphs = A(c, 3), count = A(c, 4);
   if (!glyphs) return;
   FT_Set_Pixel_Sizes(f, 0, FT_UInt(g_font_size > 1 ? g_font_size : 12));
+
+  // What the text actually says. A CGGlyph is an index, so the log is
+  // unreadable without turning it back into characters -- and "the buttons
+  // are illegible" is a different bug from "the buttons say the wrong thing".
+  if (trace) {
+    std::string text;
+    for (uint32_t i = 0; i < count && i < 128; ++i) {
+      const uint16_t g = ARC_LD16(glyphs + i * 2);
+      char ch = '?';
+      for (int k = 32; k < 127; ++k)
+        if (FT_Get_Char_Index(f, FT_ULong(k)) == g) {
+          ch = char(k);
+          break;
+        }
+      text += ch;
+    }
+    std::printf("  text \"%s\"\n", text.c_str());
+  }
 
   float pen = px;
   int lit = 0, lost = 0;
