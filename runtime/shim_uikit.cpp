@@ -47,8 +47,11 @@ constexpr int kScreenHeight = 480;
 // bottom of the screen. The backing size is read back through
 // `glGetRenderbufferParameterivOES`, which is why this is the number that
 // decides it.
-constexpr int kWindowWidth = 320;
-constexpr int kWindowHeight = 480;
+// The window is landscape, because that is how the game is meant to be seen.
+// The guest is still told its framebuffer is portrait -- see the quarter turn
+// in shim_gl -- so its own transform chain is the device's, untouched.
+constexpr int kWindowWidth = 480;
+constexpr int kWindowHeight = 320;
 
 uint32_t Bits(float f) {
   uint32_t u;
@@ -140,8 +143,8 @@ Rect FrameOf(uint32_t obj) {
   auto it = Frames().find(obj);
   if (it != Frames().end()) return it->second;
   Rect r;
-  r.w = float(WindowWidth() ? WindowWidth() : kWindowWidth);
-  r.h = float(WindowHeight() ? WindowHeight() : kWindowHeight);
+  r.w = float(kScreenWidth);
+  r.h = float(kScreenHeight);
   return r;
 }
 

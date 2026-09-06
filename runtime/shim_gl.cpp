@@ -66,15 +66,38 @@ void GlClear(Arm32Ctx* c) { glClear(A(c, 0)); }
 void GlClearColor(Arm32Ctx* c) {
   glClearColor(Af(c, 0), Af(c, 1), Af(c, 2), Af(c, 3));
 }
+// --- the quarter turn ------------------------------------------------------
+// The guest is handed the portrait framebuffer a device would have given it --
+// `glGetRenderbufferParameterivOES` reports the window turned a quarter turn
+// -- and it rotates its landscape content into that, exactly as it does on
+// hardware. Nothing about the guest's own arithmetic changes.
+//
+// The turn back happens here, in clip space, where it is one rotation and no
+// copy: the projection becomes R(90) . Ortho, so what the guest computed as
+// portrait clip coordinates lands on a landscape window. The alternative --
+// render to a texture and blit it rotated -- needs a framebuffer object and
+// two passes to do the same thing.
+//
+// ponytail: this assumes the guest builds its projection the usual way, with
+// `glLoadIdentity()` immediately before `glOrthof`. If a title composes a
+// projection out of several calls, this rotation has to move to the matrix
+// stack rather than sit inside one call.
 void GlViewport(Arm32Ctx* c) {
-  glViewport(int(A(c, 0)), int(A(c, 1)), int(A(c, 2)), int(A(c, 3)));
+  // The guest sizes its viewport from the backing it was told about, which is
+  // the portrait one. The real window is the other way round.
+  (void)c;
+  glViewport(0, 0, WindowWidth(), WindowHeight());
 }
 void GlGetIntegerv(Arm32Ctx* c) {
   glGetIntegerv(A(c, 0), reinterpret_cast<GLint*>(uintptr_t(A(c, 1))));
 }
 
 // --- matrices --------------------------------------------------------------
-void GlMatrixMode(Arm32Ctx* c) { glMatrixMode(A(c, 0)); }
+uint32_t g_matrix_mode = GL_MODELVIEW;
+void GlMatrixMode(Arm32Ctx* c) {
+  g_matrix_mode = A(c, 0);
+  glMatrixMode(A(c, 0));
+}
 void GlLoadIdentity(Arm32Ctx*) { glLoadIdentity(); }
 void GlPushMatrix(Arm32Ctx*) { glPushMatrix(); }
 void GlPopMatrix(Arm32Ctx*) { glPopMatrix(); }
@@ -86,6 +109,7 @@ void GlRotatef(Arm32Ctx* c) {
 
 // glOrthof is the one name desktop GL does not share: it takes doubles there.
 void GlOrthof(Arm32Ctx* c) {
+  if (g_matrix_mode == GL_PROJECTION) glRotatef(90.0f, 0.0f, 0.0f, 1.0f);
   glOrtho(Af(c, 0), Af(c, 1), Af(c, 2), Af(c, 3), Af(c, 4), Af(c, 5));
 }
 
@@ -197,8 +221,10 @@ void GetRenderbufferParameteriv(Arm32Ctx* c) {
   GLint* out = reinterpret_cast<GLint*>(uintptr_t(A(c, 2)));
   if (!out) return;
   const uint32_t pname = A(c, 1);
-  if (pname == kRenderbufferWidthOES) *out = WindowWidth();
-  else if (pname == kRenderbufferHeightOES) *out = WindowHeight();
+  // Turned a quarter turn: the guest gets the portrait framebuffer a device
+  // has, and the projection turns its output back. See GlViewport.
+  if (pname == kRenderbufferWidthOES) *out = WindowHeight();
+  else if (pname == kRenderbufferHeightOES) *out = WindowWidth();
   else *out = 0;
 }
 
