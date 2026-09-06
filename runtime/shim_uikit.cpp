@@ -26,6 +26,13 @@
 namespace arc {
 
 size_t DrainOperations(Arm32Ctx* c);
+uint32_t HostSetOf(uint32_t element);
+void HostSetColor(uint32_t obj, float r, float g, float b, float a);
+size_t RunDuePerforms(Arm32Ctx* c);
+
+// The view that answers touches, remembered when it is framed -- see the
+// touches section below, which is where it is used.
+extern uint32_t g_touch_view;
 
 // Defined below, and called from UIApplicationMain as well as from
 // -[NSRunLoop run]: on a device UIApplicationMain never returns, and an app
@@ -183,7 +190,14 @@ void SetFrame(Arm32Ctx* c) {
 // -initWithFrame: on UIView is where FlxGLView's own [super initWithFrame:]
 // lands. Returning self is the whole contract -- the subclass does the rest,
 // and all of that is lifted code -- but the rect it was given is kept.
-void InitWithFrame(Arm32Ctx* c) { TakeFrame(c); /* r0 already holds self */ }
+void InitWithFrame(Arm32Ctx* c) {
+  TakeFrame(c);
+  // The touch target, caught on its way past: see DeliverTouch.
+  const uint32_t self = ARC_R(c, 0);
+  if (self && Objc().Lookup(ARC_LD32(self), "touchesBegan:withEvent:"))
+    g_touch_view = self;
+  /* r0 already holds self */
+}
 
 void MakeKeyAndVisible(Arm32Ctx* c) {
   // The first time anything asks to be visible, there is a window to be
@@ -223,8 +237,40 @@ void Layer(Arm32Ctx* c) {
 // give this map an RGBA and answer `getRed:green:blue:alpha:` from it.
 void SomeColor(Arm32Ctx* c) {
   static std::map<uint32_t, uint32_t> made;
-  uint32_t& obj = made[ARC_R(c, 1)];
-  if (!obj) obj = HostAllocInstance(HostClass("UIColor", "NSObject"));
+  const uint32_t sel = ARC_R(c, 1);
+  uint32_t& obj = made[sel];
+  if (!obj) {
+    obj = HostAllocInstance(HostClass("UIColor", "NSObject"));
+    // The components, because something does eventually ask: a colour with
+    // none is refused by `-[FlxTexture initWithColor:]` with "invalid
+    // component count". The selector's own name is the key, and an unknown
+    // one is opaque white rather than nothing.
+    static const struct {
+      const char* sel;
+      float r, g, b, a;
+    } kColors[] = {
+        {"whiteColor", 1, 1, 1, 1},        {"blackColor", 0, 0, 0, 1},
+        {"grayColor", .5f, .5f, .5f, 1},   {"darkGrayColor", .33f, .33f, .33f, 1},
+        {"lightGrayColor", .66f, .66f, .66f, 1}, {"clearColor", 0, 0, 0, 0},
+        {"redColor", 1, 0, 0, 1},          {"greenColor", 0, 1, 0, 1},
+        {"blueColor", 0, 0, 1, 1},         {"cyanColor", 0, 1, 1, 1},
+        {"yellowColor", 1, 1, 0, 1},       {"magentaColor", 1, 0, 1, 1},
+        {"orangeColor", 1, .5f, 0, 1},     {"purpleColor", .5f, 0, .5f, 1},
+        {"brownColor", .6f, .4f, .2f, 1},
+    };
+    const char* name = reinterpret_cast<const char*>(uintptr_t(sel));
+    float r = 1, g = 1, b = 1, a = 1;
+    if (name)
+      for (const auto& k : kColors)
+        if (std::strcmp(name, k.sel) == 0) {
+          r = k.r;
+          g = k.g;
+          b = k.b;
+          a = k.a;
+          break;
+        }
+    HostSetColor(obj, r, g, b, a);
+  }
   ARC_W(c, 0, obj);
 }
 
@@ -327,6 +373,81 @@ void RunDueAnimations(Arm32Ctx* c) {
   ARC_W(c, 13, sp);
 }
 
+// --- touches ---------------------------------------------------------------
+// A mouse is one finger. UIKit delivers a touch as an NSSet of UITouch handed
+// to `-touchesBegan:withEvent:` on the view, and Canabalt's FlxGLView passes
+// `[event allTouches]` straight to `-[FlxGlobal processTouches:]`. The binary
+// asks a touch for exactly one thing -- `locationInView:` -- and never for its
+// phase, because which of the three methods was called says that already.
+//
+// The view is the one that answers `touchesBegan:withEvent:`, remembered when
+// it is framed: its own `initWithFrame:` goes through `[super initWithFrame:]`
+// and lands here, which is the only moment a shim sees that instance.
+uint32_t g_touch = 0;
+uint32_t g_touch_set = 0;
+uint32_t g_touch_event = 0;
+float g_touch_x = 0, g_touch_y = 0;
+
+void TouchLocationInView(Arm32Ctx* c) { ReturnPoint(c, g_touch_x, g_touch_y); }
+void EventAllTouches(Arm32Ctx* c) { ARC_W(c, 0, g_touch_set); }
+
+// The window is landscape and the guest's view is the portrait one a device
+// has, turned a quarter turn by the projection -- so a point comes back the
+// same way. See the quarter turn in shim_gl.
+// ARC_TAP="x,y[,frame]" taps the window at that point, in window pixels, so
+// that "does the PLAY button start the game" is a question that can be asked
+// without a person clicking. Down at `frame` (200 by default), up four frames
+// later, because a button wants both halves.
+Touch ScriptedTouch(long frame) {
+  static long at = -1;
+  static float x = 0, y = 0;
+  static bool parsed = false;
+  if (!parsed) {
+    parsed = true;
+    if (const char* env = std::getenv("ARC_TAP")) {
+      char* end = nullptr;
+      x = std::strtof(env, &end);
+      if (end && *end == ',') y = std::strtof(end + 1, &end);
+      at = (end && *end == ',') ? std::strtol(end + 1, nullptr, 10) : 200;
+    }
+  }
+  Touch t;
+  if (at < 0) return t;
+  if (frame == at) t = {Touch::kBegan, x, y, true};
+  else if (frame == at + 4) t = {Touch::kEnded, x, y, true};
+  return t;
+}
+
+void DeliverTouch(Arm32Ctx* c, long frame) {
+  Touch t = ScriptedTouch(frame);
+  if (!t.valid) t = WindowTakeTouch();
+  if (!t.valid || !g_touch_view) return;
+  if (!g_touch) {
+    g_touch = HostAllocInstance(HostClass("UITouch", "NSObject"));
+    g_touch_event = HostAllocInstance(HostClass("UIEvent", "NSObject"));
+    g_touch_set = HostSetOf(g_touch);
+  }
+  if (!g_touch || !g_touch_set) return;
+  g_touch_x = float(WindowHeight()) - t.y;
+  g_touch_y = t.x;
+
+  const char* sel = t.phase == Touch::kBegan   ? "touchesBegan:withEvent:"
+                    : t.phase == Touch::kMoved ? "touchesMoved:withEvent:"
+                                               : "touchesEnded:withEvent:";
+  const uint32_t imp = Objc().Lookup(ARC_LD32(g_touch_view), sel);
+  if (!imp) return;
+  std::printf("[touch] %s at (%.0f,%.0f)\n", sel, double(g_touch_x),
+              double(g_touch_y));
+  const uint32_t sp = ARC_SP(c);
+  ARC_W(c, 13, sp - 16);
+  ARC_W(c, 0, g_touch_view);
+  ARC_W(c, 1, 0);  // _cmd, which the implementation does not read
+  ARC_W(c, 2, g_touch_set);
+  ARC_W(c, 3, g_touch_event);
+  arc_dispatch(c, imp);
+  ARC_W(c, 13, sp);
+}
+
 // --- the frame loop --------------------------------------------------------
 
 uint32_t g_link_target = 0;
@@ -409,6 +530,9 @@ const Entry kEntries[] = {
 
     // The whole standard set, because the next one asked for is a stop and
     // they all cost the same.
+    {"UITouch", false, "locationInView:", TouchLocationInView},
+    {"UIEvent", false, "allTouches", EventAllTouches},
+
     {"UIColor", true, "whiteColor", SomeColor},
     {"UIColor", true, "blackColor", SomeColor},
     {"UIColor", true, "grayColor", SomeColor},
@@ -504,6 +628,8 @@ void RunFrameLoop(Arm32Ctx* c) {
     // Anything whose duration has run out fires before the frame that would
     // have seen its effect.
     RunDueAnimations(c);
+    RunDuePerforms(c);
+    DeliverTouch(c, frames);
     if (const char* shot = std::getenv("ARC_SHOT"))
       if (frames + 1 == limit) WindowCaptureNext(shot);
     ARC_W(c, 0, g_link_target);
@@ -547,5 +673,7 @@ void InstallUIKitObjects() {
     HostMethod(e.cls, e.meta, e.sel, e.fn);
   }
 }
+
+uint32_t g_touch_view = 0;
 
 }  // namespace arc

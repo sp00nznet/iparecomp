@@ -106,9 +106,23 @@ std::string KeyText(uint32_t obj) {
   if (!obj) return std::string();
   const std::string s = StringText(obj);
   if (!s.empty()) return s;
-  // Not a string at all: key on identity, which is right for an object used
-  // as a token rather than as text.
   char buf[24];
+  // A boxed pointer keys on what it boxes, not on the box. Two NSValues made
+  // from the same pointer are equal to a real NSDictionary and have to be
+  // equal here: Canabalt keys its per-class sprite setup by
+  // `[NSValue valueWithPointer:[self class]]`, and boxing the same class
+  // twice was giving two different keys, so every sprite after the first
+  // "was not initialized, making a best guess".
+  auto it = Fields().find(obj);
+  if (it != Fields().end()) {
+    auto p = it->second.find("pointer");
+    if (p != it->second.end()) {
+      std::snprintf(buf, sizeof buf, "@%08x", p->second);
+      return buf;
+    }
+  }
+  // Not a string and not a box: key on identity, which is right for an object
+  // used as a token rather than as text.
   std::snprintf(buf, sizeof buf, "#%08x", obj);
   return buf;
 }
@@ -317,6 +331,7 @@ const char* HostSuperOf(const char* cls) {
     const char* super;
   } kSupers[] = {
       {"NSMutableArray", "NSArray"},
+      {"NSMutableSet", "NSSet"},
       {"NSMutableDictionary", "NSDictionary"},
       {"NSMutableString", "NSString"},
       {"NSMutableData", "NSData"},
@@ -400,6 +415,117 @@ void ArrayInitWithArray(Arm32Ctx* c) {
 
 void ArrayAddObjectsFromArray(Arm32Ctx* c) {
   Extend(ARC_R(c, 0), ARC_R(c, 2));
+  ARC_W(c, 0, 0);
+}
+
+// A set, for the shims' own use. UIKit hands touches over as an NSSet and the
+// guest asks it for `anyObject` or walks it with an enumerator, so the set is
+// an array with three more methods rather than a second collection.
+void ArrayAnyObject(Arm32Ctx* c) {
+  auto it = Arrays().find(ARC_R(c, 0));
+  ARC_W(c, 0, it == Arrays().end() || it->second.empty() ? 0 : it->second[0]);
+}
+
+void ArrayObjectEnumerator(Arm32Ctx* c) {
+  const uint32_t e = HostAllocInstance(HostClass("NSEnumerator", "NSObject"));
+  if (e) {
+    Fields()[e]["array"] = ARC_R(c, 0);
+    Fields()[e]["next"] = 0;
+  }
+  ARC_W(c, 0, e);
+}
+
+void EnumeratorNextObject(Arm32Ctx* c) {
+  auto e = Fields().find(ARC_R(c, 0));
+  if (e == Fields().end()) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  auto it = Arrays().find(e->second["array"]);
+  const uint32_t i = e->second["next"];
+  if (it == Arrays().end() || i >= it->second.size()) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  e->second["next"] = i + 1;
+  ARC_W(c, 0, it->second[i]);
+}
+
+// NSSet, backed by the same vector. The only thing a set owes that an array
+// does not is that adding a member twice leaves one, so that is the only
+// method written out; everything else is the array's, pointed at from the set
+// rows of the table. Giving NSSet NSArray as a superclass would have been
+// shorter and would also have made `isKindOfClass:[NSArray class]` true,
+// which is a lie the guest is entitled to act on.
+bool Holds(const std::vector<uint32_t>& v, uint32_t x) {
+  for (uint32_t e : v)
+    if (e == x) return true;
+  return false;
+}
+
+uint32_t MakeSet(const char* cls, uint32_t from) {
+  const uint32_t a = MakeArray(cls);
+  if (!a) return 0;
+  auto& out = Arrays()[a];
+  out.clear();
+  auto it = Arrays().find(from);
+  if (it != Arrays().end()) {
+    const std::vector<uint32_t> src = it->second;
+    for (uint32_t e : src)
+      if (!Holds(out, e)) out.push_back(e);
+  } else if (from) {
+    out.push_back(from);
+  }
+  return a;
+}
+
+void SetNew(Arm32Ctx* c) { ARC_W(c, 0, MakeSet("NSMutableSet", 0)); }
+void SetWithCollection(Arm32Ctx* c) {
+  ARC_W(c, 0, MakeSet("NSMutableSet", ARC_R(c, 2)));
+}
+void SetInitWithCollection(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0);
+  if (self) {
+    auto& out = Arrays()[self];
+    out.clear();
+    auto it = Arrays().find(ARC_R(c, 2));
+    if (it != Arrays().end()) {
+      const std::vector<uint32_t> src = it->second;
+      for (uint32_t e : src)
+        if (!Holds(out, e)) out.push_back(e);
+    }
+  }
+  ARC_W(c, 0, self);
+}
+
+void SetAddObject(Arm32Ctx* c) {
+  const uint32_t v = ARC_R(c, 2);
+  auto& out = Arrays()[ARC_R(c, 0)];
+  if (v && !Holds(out, v)) out.push_back(v);
+  ARC_W(c, 0, 0);
+}
+
+void SetMinus(Arm32Ctx* c) {
+  auto other = Arrays().find(ARC_R(c, 2));
+  auto self = Arrays().find(ARC_R(c, 0));
+  if (other != Arrays().end() && self != Arrays().end()) {
+    const std::vector<uint32_t> drop = other->second;
+    std::vector<uint32_t> kept;
+    for (uint32_t e : self->second)
+      if (!Holds(drop, e)) kept.push_back(e);
+    self->second.swap(kept);
+  }
+  ARC_W(c, 0, 0);
+}
+
+void SetUnion(Arm32Ctx* c) {
+  auto it = Arrays().find(ARC_R(c, 2));
+  if (it != Arrays().end()) {
+    auto& out = Arrays()[ARC_R(c, 0)];
+    const std::vector<uint32_t> src = it->second;
+    for (uint32_t e : src)
+      if (!Holds(out, e)) out.push_back(e);
+  }
   ARC_W(c, 0, 0);
 }
 
@@ -534,6 +660,47 @@ void FloatForKey(Arm32Ctx* c) {
 }
 
 // --- UIColor ---------------------------------------------------------------
+// A colour is now asked what it is made of. `-[FlxTexture initWithColor:]`
+// reads `CGColorGetNumberOfComponents` and refuses anything that is not four,
+// with "invalid component count in color" -- so an opaque token is no longer
+// enough, and a UIColor doubles as its own CGColorRef because nothing here
+// distinguishes them.
+void SetColorComponents(uint32_t obj, float r, float g, float b, float a) {
+  if (!obj) return;
+  auto& f = Fields()[obj];
+  f["r"] = Bits(r);
+  f["g"] = Bits(g);
+  f["b"] = Bits(b);
+  f["a"] = Bits(a);
+  f["rgba"] = 1;
+}
+
+void ColorNumberOfComponents(Arm32Ctx* c) {
+  auto it = Fields().find(ARC_R(c, 0));
+  ARC_W(c, 0, it != Fields().end() && it->second.count("rgba") ? 4u : 0u);
+}
+
+// CGColorGetComponents returns a pointer to the floats, so they have to live
+// somewhere the guest can read. One buffer, refilled per call: the caller
+// reads it immediately and never holds it.
+void ColorComponents(Arm32Ctx* c) {
+  auto it = Fields().find(ARC_R(c, 0));
+  if (it == Fields().end() || !it->second.count("rgba")) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  static uint32_t buf = 0;
+  if (!buf) buf = arc_guest_alloc(16, 4);
+  if (!buf) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  const char* keys[4] = {"r", "g", "b", "a"};
+  for (int i = 0; i < 4; ++i)
+    ARC_ST32(buf + uint32_t(i) * 4, it->second[keys[i]]);
+  ARC_W(c, 0, buf);
+}
+
 void ColorWithRGBA(Arm32Ctx* c) {
   // Four floats under the soft-float ABI: r2, r3, then the stack.
   const uint32_t obj = HostAllocInstance(HostClass("UIColor", "NSObject"));
@@ -544,6 +711,7 @@ void ColorWithRGBA(Arm32Ctx* c) {
   const uint32_t sp = ARC_SP(c);
   f["b"] = arc_guest_owns(sp, 4) ? ARC_LD32(sp) : 0;
   f["a"] = arc_guest_owns(sp + 4, 4) ? ARC_LD32(sp + 4) : Bits(1.0f);
+  f["rgba"] = 1;
   ARC_W(c, 0, obj);
 }
 
@@ -574,6 +742,38 @@ std::vector<uint32_t>& Queued() {
 
 void AddOperation(Arm32Ctx* c) {
   Queued().push_back(ARC_R(c, 2));
+  ARC_W(c, 0, 0);
+}
+
+// -performSelector:withObject:afterDelay: -- a message posted to the run loop,
+// which is exactly what it says and exactly what it must not be turned into.
+// Canabalt's buttons use it for their action, and running it inline would put
+// the new state's construction inside the old state's render. Same lesson as
+// the operation queue and the animation completions: an asynchronous thing
+// run synchronously arrives before the thing it depends on.
+struct Perform {
+  uint32_t target = 0, sel = 0, object = 0;
+  std::chrono::steady_clock::time_point due;
+};
+
+std::vector<Perform>& Performs() {
+  static std::vector<Perform> v;
+  return v;
+}
+
+void PerformAfterDelay(Arm32Ctx* c) {
+  Perform p;
+  p.target = ARC_R(c, 0);
+  p.sel = ARC_R(c, 2);
+  p.object = ARC_R(c, 3);
+  const uint32_t bits = ARC_LD32(ARC_SP(c));
+  float delay;
+  std::memcpy(&delay, &bits, 4);
+  if (!(delay > 0) || delay > 60) delay = 0;
+  p.due = std::chrono::steady_clock::now() +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              std::chrono::duration<double>(delay));
+  if (p.target && p.sel) Performs().push_back(p);
   ARC_W(c, 0, 0);
 }
 
@@ -829,7 +1029,9 @@ const Entry kEntries[] = {
      LocalizedStringForKey},
     {"NSBundle", false, "infoDictionary", ObjectForKey},
     {"NSUserDefaults", false, "registerDefaults:", Nop},
-    {"UIColor", false, "CGColor", NilMethod},
+    // A UIColor is its own CGColorRef here: nothing distinguishes them, and
+    // the components live on the object either way.
+    {"UIColor", false, "CGColor", SelfMethod},
 
     // Reading a notification's payload off something that is not one. Nothing
     // posts notifications here, so the game is asking about an event that did
@@ -842,6 +1044,8 @@ const Entry kEntries[] = {
     {"NSObject", false, "object", Nop},
     {"NSObject", false, "name", Nop},
 
+    {"NSObject", false, "performSelector:withObject:afterDelay:",
+     PerformAfterDelay},
     {"NSObject", false, "copy", SelfMethod},
     {"NSObject", false, "mutableCopy", SelfMethod},
     {"NSBundle", false, "resourcePath", ResourcePath},
@@ -869,6 +1073,35 @@ const Entry kEntries[] = {
     {"NSArray", false, "count", ArrayCount},
     {"NSArray", false, "objectAtIndex:", ArrayObjectAtIndex},
     {"NSArray", false, "lastObject", ArrayLastObject},
+    {"NSArray", false, "anyObject", ArrayAnyObject},
+    {"NSArray", false, "objectEnumerator", ArrayObjectEnumerator},
+    {"NSEnumerator", false, "nextObject", EnumeratorNextObject},
+
+    {"NSSet", true, "set", SetNew},
+    {"NSSet", true, "setWithSet:", SetWithCollection},
+    {"NSSet", true, "setWithArray:", SetWithCollection},
+    {"NSSet", true, "setWithObject:", SetWithCollection},
+    {"NSSet", false, "initWithSet:", SetInitWithCollection},
+    {"NSSet", false, "initWithArray:", SetInitWithCollection},
+    {"NSSet", false, "count", ArrayCount},
+    {"NSSet", false, "anyObject", ArrayAnyObject},
+    {"NSSet", false, "allObjects", SetWithCollection},
+    {"NSSet", false, "containsObject:", ArrayContains},
+    {"NSSet", false, "member:", ArrayContains},
+    {"NSSet", false, "objectEnumerator", ArrayObjectEnumerator},
+    {"NSSet", false, "countByEnumeratingWithState:objects:count:",
+     CountByEnumerating},
+    {"NSMutableSet", true, "set", SetNew},
+    {"NSMutableSet", true, "setWithCapacity:", SetNew},
+    {"NSMutableSet", true, "setWithSet:", SetWithCollection},
+    {"NSMutableSet", true, "setWithArray:", SetWithCollection},
+    {"NSMutableSet", false, "addObject:", SetAddObject},
+    {"NSMutableSet", false, "addObjectsFromArray:", SetUnion},
+    {"NSMutableSet", false, "unionSet:", SetUnion},
+    {"NSMutableSet", false, "minusSet:", SetMinus},
+    {"NSMutableSet", false, "intersectSet:", SetUnion},
+    {"NSMutableSet", false, "removeObject:", ArrayRemoveObject},
+    {"NSMutableSet", false, "removeAllObjects", ArrayRemoveAll},
     {"NSArray", false, "containsObject:", ArrayContains},
     {"NSArray", false, "countByEnumeratingWithState:objects:count:",
      CountByEnumerating},
@@ -924,6 +1157,8 @@ const CImport kCImports[] = {
     {"_NSStringFromClass", StringFromClass},
     {"_NSClassFromString", ClassFromString},
     {"_CFAbsoluteTimeGetCurrent", AbsoluteTimeGetCurrent},
+    {"_CGColorGetNumberOfComponents", ColorNumberOfComponents},
+    {"_CGColorGetComponents", ColorComponents},
 };
 
 }  // namespace
@@ -951,6 +1186,46 @@ size_t DrainOperations(Arm32Ctx* c) {
     }
   }
   return ran;
+}
+
+// Everything whose delay has run out, sent now. The run loop calls this once a
+// frame, which is the granularity a device's run loop would have given it too.
+size_t RunDuePerforms(Arm32Ctx* c) {
+  const auto now = std::chrono::steady_clock::now();
+  std::vector<Perform> due, later;
+  for (const auto& p : Performs()) (p.due <= now ? due : later).push_back(p);
+  Performs().swap(later);
+  for (const auto& p : due) {
+    const char* name = reinterpret_cast<const char*>(uintptr_t(p.sel));
+    const uint32_t imp = Objc().Lookup(ARC_LD32(p.target), name);
+    if (!imp) continue;
+    const uint32_t sp = ARC_SP(c);
+    ARC_W(c, 13, sp - 16);
+    ARC_W(c, 0, p.target);
+    ARC_W(c, 1, p.sel);
+    ARC_W(c, 2, p.object);
+    arc_dispatch(c, imp);
+    ARC_W(c, 13, sp);
+  }
+  return due.size();
+}
+
+// For the named colours, which are made elsewhere and still have to answer
+// what they are made of.
+void HostSetColor(uint32_t obj, float r, float g, float b, float a) {
+  SetColorComponents(obj, r, g, b, a);
+}
+
+// A collection holding one object, for a shim that has to hand the guest a set
+// -- the touches UIKit delivers, above all. It is an NSArray, which answers
+// everything a one-element NSSet is asked.
+uint32_t HostSetOf(uint32_t element) {
+  const uint32_t a = MakeArray("NSMutableArray");
+  if (a) {
+    Arrays()[a].clear();
+    if (element) Arrays()[a].push_back(element);
+  }
+  return a;
 }
 
 // The one string reader, shared. Anything holding text -- a literal the

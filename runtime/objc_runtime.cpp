@@ -343,7 +343,6 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel);
 void Initialize(Arm32Ctx* c, uint32_t cls) {
   if (!cls) return;
   static std::set<uint32_t> done;
-  static bool inside = false;
   const ObjcClass* k = g_objc.ClassAt(cls);
   if (!k) return;
   // A class method arrives at the metaclass, and it is the *class* that gets
@@ -366,16 +365,16 @@ void Initialize(Arm32Ctx* c, uint32_t cls) {
   if (k->superclass) Initialize(c, k->superclass);
   const uint32_t imp = g_objc.Lookup(k->isa ? k->isa : self, "initialize");
   if (!imp) return;
-  // Reentrancy: +initialize sends messages, and those messages must not send
-  // +initialize to the class that is midway through its own. The set entry is
-  // already in place above, so only the argument registers need protecting.
-  if (inside) return;
-  inside = true;
+  // Nesting is normal: `+initialize` sends messages, and those reach classes
+  // that have not been initialized yet. The `done` entry above is what stops
+  // the recursive case -- a class midway through its own `+initialize` is
+  // already marked -- and the saved context is what lets the outer one carry
+  // on afterwards. A flat "one at a time" guard here marked classes done and
+  // then never ran them, which is worse than not having this at all.
   Arm32Ctx saved = *c;
   ARC_W(c, 0, self);
   arc_dispatch(c, imp);
   *c = saved;
-  inside = false;
 }
 
 // `cls` is the class to start the lookup from. Passing zero means "read it out
@@ -589,9 +588,24 @@ void MsgSendSuper2(Arm32Ctx* c) {
 // objc_copyStruct(dest, src, size, atomic, hasStrong)
 void CopyStruct(Arm32Ctx* c) {
   const uint32_t dst = ARC_R(c, 0), src = ARC_R(c, 1), n = ARC_R(c, 2);
-  if (dst && src && n && n < (1u << 20))
-    memmove(reinterpret_cast<void*>(uintptr_t(dst)),
-            reinterpret_cast<const void*>(uintptr_t(src)), n);
+  if (!dst || !n || n >= (1u << 20)) return;
+  // A synthesized struct getter reads `self + offset`, so a nil `self` asks
+  // for the ivar offset as an address -- 0x1c, say, which is not a fault the
+  // guest can describe and not one worth taking. An empty struct is what a
+  // nil receiver returns in real Objective-C anyway.
+  if (!arc_guest_owns(src, n) || !arc_guest_owns(dst, n)) {
+    static bool said = false;
+    if (!said) {
+      said = true;
+      std::printf("objc_copyStruct: %u bytes from %#x to %#x is not memory "
+                  "the guest owns; zeroing instead\n", n, src, dst);
+    }
+    if (arc_guest_owns(dst, n))
+      memset(reinterpret_cast<void*>(uintptr_t(dst)), 0, n);
+    return;
+  }
+  memmove(reinterpret_cast<void*>(uintptr_t(dst)),
+          reinterpret_cast<const void*>(uintptr_t(src)), n);
 }
 
 // objc_getProperty(self, _cmd, offset, atomic)
