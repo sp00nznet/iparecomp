@@ -328,6 +328,56 @@ void NoteMessage(uint32_t cls, const char* selector) {
   arc_trace_note(kept.back().c_str());
 }
 
+// A class is sent `+initialize` once, before the first message that reaches
+// it, superclass first. Nothing here did that, and it is not a nicety: a
+// class's `+initialize` is where the statics it needs get built. Canabalt's
+// NokiaFont makes its CGFont there, out of the bundle's Nokia.ttf; without it
+// the font ivar stayed nil, every glyph was skipped, every texture uploaded
+// was entirely zero, and the game drew a correct menu out of blank textures.
+//
+// Real dispatch does this on the lookup path with a bit in the class. This
+// does it with a set, which is the same thing at this scale, and it happens
+// before the lookup so that `+initialize` can install what the lookup needs.
+void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel);
+
+void Initialize(Arm32Ctx* c, uint32_t cls) {
+  if (!cls) return;
+  static std::set<uint32_t> done;
+  static bool inside = false;
+  const ObjcClass* k = g_objc.ClassAt(cls);
+  if (!k) return;
+  // A class method arrives at the metaclass, and it is the *class* that gets
+  // initialized -- which is the case that matters most, because `+initialize`
+  // is reached through class methods. So a metaclass resolves back to the
+  // class whose isa it is.
+  uint32_t self = cls;
+  if (k->meta) {
+    self = 0;
+    for (const auto& other : g_objc.classes())
+      if (!other.meta && other.isa == cls) {
+        self = other.addr;
+        break;
+      }
+    if (!self) return;
+    k = g_objc.ClassAt(self);
+    if (!k) return;
+  }
+  if (!done.insert(self).second) return;
+  if (k->superclass) Initialize(c, k->superclass);
+  const uint32_t imp = g_objc.Lookup(k->isa ? k->isa : self, "initialize");
+  if (!imp) return;
+  // Reentrancy: +initialize sends messages, and those messages must not send
+  // +initialize to the class that is midway through its own. The set entry is
+  // already in place above, so only the argument registers need protecting.
+  if (inside) return;
+  inside = true;
+  Arm32Ctx saved = *c;
+  ARC_W(c, 0, self);
+  arc_dispatch(c, imp);
+  *c = saved;
+  inside = false;
+}
+
 // `cls` is the class to start the lookup from. Passing zero means "read it out
 // of the receiver" -- which has to happen *after* the receiver is checked,
 // because reading an isa out of a value that was never an object is exactly
@@ -429,6 +479,7 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
                   arc_guest_owns(sp + 8, 4) ? ARC_LD32(sp + 8) : 0);
     }
   }
+  Initialize(c, cls);
   const uint32_t imp = g_objc.Lookup(cls, name);
   if (imp) {
     // Registers are already arranged as the guest left them: receiver in r0,

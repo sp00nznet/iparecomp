@@ -19,6 +19,7 @@
 // the drawn text turns out to be the wrong letters, this comment is where to
 // start.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -206,11 +207,27 @@ void ContextSetFontSize(Arm32Ctx* c) {
 // whatever bitmap context is current -- which is the buffer the game is about
 // to hand to glTexImage2D, so this is where text becomes a texture.
 void ShowGlyphsAtPoint(Arm32Ctx* c) {
+  const bool trace = std::getenv("ARC_TRACE_TEX") != nullptr;
   uint32_t data = 0;
   int bw = 0, bh = 0, stride = 0;
-  if (!BitmapContextInfo(A(c, 0), &data, &bw, &bh, &stride)) return;
+  if (!BitmapContextInfo(A(c, 0), &data, &bw, &bh, &stride)) {
+    if (trace) std::printf("[glyph] no bitmap context %#x\n", A(c, 0));
+    return;
+  }
   FT_Face f = FaceOf(g_current_font);
-  if (!f) return;
+  if (!f) {
+    if (trace) std::printf("[glyph] no face for font %#x\n", g_current_font);
+    return;
+  }
+  // ARC_TRACE_TEX=1 also covers this: where the pen was put, how big the
+  // bitmap is, and -- below -- how much of the text actually landed inside it.
+  // Text that misses its own texture is indistinguishable from text that was
+  // never drawn, right up until the count says which.
+  if (trace)
+    std::printf("[glyph] ctx=%#x data=%#x %dx%d stride=%d pen=(%.1f,%.1f) "
+                "n=%u size=%.1f\n",
+                A(c, 0), data, bw, bh, stride, Af(c, 1), Af(c, 2), A(c, 4),
+                double(g_font_size));
 
   const float px = Af(c, 1), py = Af(c, 2);
   const uint32_t glyphs = A(c, 3), count = A(c, 4);
@@ -218,6 +235,7 @@ void ShowGlyphsAtPoint(Arm32Ctx* c) {
   FT_Set_Pixel_Sizes(f, 0, FT_UInt(g_font_size > 1 ? g_font_size : 12));
 
   float pen = px;
+  int lit = 0, lost = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(uintptr_t(data));
   for (uint32_t i = 0; i < count && i < 4096; ++i) {
     const uint16_t g = ARC_LD16(glyphs + i * 2);
@@ -228,10 +246,16 @@ void ShowGlyphsAtPoint(Arm32Ctx* c) {
       // CoreGraphics has the origin at the bottom left; the glyph bitmap runs
       // top down. Same flip as every other blit here.
       const int dy = bh - 1 - int(py + float(slot->bitmap_top) - float(row));
-      if (dy < 0 || dy >= bh) continue;
+      if (dy < 0 || dy >= bh) {
+        lost += int(bm.width);
+        continue;
+      }
       for (unsigned col = 0; col < bm.width; ++col) {
         const int dx = int(pen) + slot->bitmap_left + int(col);
-        if (dx < 0 || dx >= bw) continue;
+        if (dx < 0 || dx >= bw) {
+          ++lost;
+          continue;
+        }
         const uint8_t a = bm.buffer[row * unsigned(bm.pitch) + col];
         if (!a) continue;
         // White text, coverage in alpha. The game tints it afterwards.
@@ -240,10 +264,12 @@ void ShowGlyphsAtPoint(Arm32Ctx* c) {
         p[1] = 0xFF;
         p[2] = 0xFF;
         p[3] = a;
+        ++lit;
       }
     }
     pen += float(slot->advance.x) / 64.0f;
   }
+  if (trace) std::printf("  %d pixels landed, %d fell outside\n", lit, lost);
 }
 
 struct Shim {

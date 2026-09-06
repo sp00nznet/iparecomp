@@ -693,6 +693,16 @@ void NewlineCharacterSet(Arm32Ctx* c) {
 // instead of failing later for a reason that looks unrelated.
 void ResourcePath(Arm32Ctx* c);
 
+// -[NSBundle pathForResource:ofType:] -- nil until now, and nil is the wrong
+// answer when the file is right there. It is how a title finds everything it
+// did not compile in: Canabalt's `+[NokiaFont initialize]` asks for Nokia.ttf
+// this way, and got nil, so the CGFont was never made, so every glyph was
+// skipped, so every texture uploaded was blank.
+//
+// The answer is only given when the file actually exists, because a path that
+// does not open fails later somewhere that looks unrelated.
+void PathForResource(Arm32Ctx* c);
+
 void ValueWithPointer(Arm32Ctx* c) {
   const uint32_t obj = HostAllocInstance(HostClass("NSValue", "NSObject"));
   if (obj) Fields()[obj]["pointer"] = ARC_R(c, 2);
@@ -836,7 +846,7 @@ const Entry kEntries[] = {
     {"NSObject", false, "mutableCopy", SelfMethod},
     {"NSBundle", false, "resourcePath", ResourcePath},
     {"NSBundle", false, "bundlePath", ResourcePath},
-    {"NSBundle", false, "pathForResource:ofType:", NilMethod},
+    {"NSBundle", false, "pathForResource:ofType:", PathForResource},
     {"NSValue", true, "valueWithPointer:", ValueWithPointer},
     {"NSValue", false, "pointerValue", PointerValue},
     {"NSNotificationCenter", true, "defaultCenter", DefaultCenter},
@@ -947,6 +957,24 @@ std::string GuestStringText(uint32_t obj) { return StringText(obj); }
 
 namespace {
 void ResourcePath(Arm32Ctx* c) { ARC_W(c, 0, MakeString(BundlePath())); }
+
+void PathForResource(Arm32Ctx* c) {
+  const std::string name = StringText(ARC_R(c, 2));
+  const std::string type = StringText(ARC_R(c, 3));
+  if (name.empty()) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  std::string path = BundlePath() + "/" + name;
+  if (!type.empty() && name.rfind("." + type) != name.size() - type.size() - 1)
+    path += "." + type;
+  if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+    std::fclose(f);
+    ARC_W(c, 0, MakeString(path));
+    return;
+  }
+  ARC_W(c, 0, 0);
+}
 }  // namespace
 
 // Where the .app's resources are. Set by the host, because only it knows.
