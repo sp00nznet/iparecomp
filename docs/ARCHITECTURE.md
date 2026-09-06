@@ -647,6 +647,44 @@ came through and those shims refuse the wrong one. It did not fire here, which
 is itself the useful result: that whole class of bug is ruled out rather than
 suspected.
 
+### A ring of entries is not a call chain
+
+The frame ring said which functions ran, and for a while that was enough. It
+stopped being enough as soon as the question was "who passed this value",
+because siblings in a ring look exactly like a parent and a child.
+
+The fix is small now that the runtime knows the live context: the note is
+emitted at the top of a lifted function, before its prologue saves anything, so
+`lr` still holds the return address. Recording it turns a ring of entries into
+a ring of call *edges*:
+
+```
+  0x00021300  -[SSText setText:]  <- 0x00023bfc -[FlxText initWithFrame:text:color:font:size:align:angle:]
+  0x00023b04  -[FlxText initWithFrame:...]  <- 0x00023010 +[FlxText textWithFrame:...]
+  0x00022f94  +[FlxText textWithFrame:...]  <- 0x000230a8 +[FlxText textWithFrame:text:color:font:size:align:]
+```
+
+That is the difference between "something passed a bad string" and a named
+chain of four convenience factories, each forwarding a longer stack argument
+list than the last.
+
+### The differential harness has a shape, and bugs hide outside it
+
+Which is the more useful finding. `lift_verify_fn.py` tests *self-contained*
+functions -- no calls, because a call would run arbitrarily deep and reach an
+unlifted stub. 150 of Canabalt's 626 qualify, and all 150 agree with Unicorn.
+
+Every function in the chain above makes calls. **None of them has ever been
+differentially tested**, and they are exactly the shape where a lifting bug
+would survive: a seven-argument method whose arguments mostly arrive on the
+stack, forwarded through four levels, each rebuilding the frame.
+
+That is not a reason to distrust the 150. It is a reason to notice that "100%
+agreement" is a statement about a subset, and to say which subset. Extending
+the harness to functions with calls -- by stubbing the callees, or letting the
+oracle run them too -- is the next thing worth building, and it is worth
+building before writing more shims.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the

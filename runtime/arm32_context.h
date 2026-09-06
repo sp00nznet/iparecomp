@@ -443,6 +443,12 @@ void arc_frame_note(uint32_t packed);
 #endif
 size_t arc_frame_count(void);
 uint32_t arc_frame_at(size_t back);
+
+// Who called it. Captured from lr at entry, before the prologue saves it, so
+// a ring of entries becomes a ring of call *edges* -- which is the difference
+// between knowing a function ran and knowing what asked it to. Zero when
+// nothing was recorded.
+uint32_t arc_frame_caller(size_t back);
 void arc_frame_clear(void);
 void arc_trace_note(const char* name);
 size_t arc_trace_count(void);

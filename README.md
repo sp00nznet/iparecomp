@@ -203,7 +203,13 @@ enough to lift in full and check against an emulator.
 - [x] **M5 — differential test.** Per instruction: 62,421 cases over 159
       operand forms, 100% agreement with Unicorn on registers, flags, the
       vector file and memory. Whole functions: 3,000 cases over 150 of
-      Canabalt's 152 self-contained functions, also 100%.
+      Canabalt's 152 *self-contained* functions, also 100%.
+
+      Worth stating precisely, because it is a claim about a subset: a
+      function that calls another is not tested, since a call would run
+      arbitrarily deep and reach an unlifted stub. That leaves 476 of the 626
+      unverified, and they are the ones with the most going on -- see
+      [The differential harness has a shape](docs/ARCHITECTURE.md#the-differential-harness-has-a-shape-and-bugs-hide-outside-it).
 - [x] **M6 — the slide.** These binaries are non-PIE with an empty rebase
       table, so nothing records which words are pointers and the image cannot
       be slid at all -- but its link address is below the 64 KB floor every
@@ -269,10 +275,13 @@ enough to lift in full and check against an emulator.
       - [x] NSArray and NSMutableArray for real, including fast enumeration,
             because `for (x in array)` is everywhere and an array that stays
             silently empty is a menu with no buttons in it.
-      - [ ] Text layout still faults. The run now gets through the menu's
-            buttons and into `-[SSText setText:]`, where it reads a wild
-            pointer -- reported, with the address and what the OS says is at
-            it, by the fault handler rather than as a bare crash.
+      - [ ] Text layout still stops. A garbage string reaches
+            `-[SSText setText:]`, and the call ring now names the chain that
+            fed it: four `+[FlxText textWithFrame:...]` convenience factories,
+            each forwarding a longer stack argument list than the last. None
+            of them is covered by the differential harness, because they all
+            make calls -- which is the next thing to fix, and worth fixing
+            before writing more shims.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite

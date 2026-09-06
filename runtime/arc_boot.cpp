@@ -283,10 +283,14 @@ void ReportTrail(const MachOImage& img) {
   const size_t frames = arc_frame_count();
   if (frames) {
     std::printf("\nguest functions entered, most recent first:\n");
-    for (size_t i = 0; i < frames && i < 20; ++i) {
+    for (size_t i = 0; i < frames && i < 48; ++i) {
       const uint32_t a = arc_frame_at(i);
+      const uint32_t from = arc_frame_caller(i);
       const char* n = NameOf(img, a);
-      std::printf("  %#010x  %s\n", a, n ? n : "");
+      const char* c = from ? NameOf(img, from) : nullptr;
+      std::printf("  %#010x  %-52s", a, n ? n : "");
+      if (from) std::printf("  <- %#010x %s", from, c ? c : "");
+      std::printf("\n");
     }
   } else {
     std::printf(

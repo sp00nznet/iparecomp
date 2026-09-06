@@ -71,6 +71,7 @@ void arc_trace_clear(void) { t_trace_next = t_trace_seen = 0; }
 // the guest call itself -- exactly where it is least safe to do anything.
 #define ARC_FRAME_RING 256
 static uint32_t t_frames[ARC_FRAME_RING];
+static uint32_t t_callers[ARC_FRAME_RING];
 static size_t t_frame_next, t_frame_seen;
 
 // The header turns this into a no-op macro when ARC_FRAMES is off, which would
@@ -99,6 +100,10 @@ void arc_frame_budget_reset(void) { g_frame_budget = g_frame_budget_start; }
 
 void arc_frame_note(uint32_t packed) {
   t_frames[t_frame_next] = packed;
+  /* lr still holds the return address here: the note is emitted at the top of
+     the function, before the prologue pushes it. */
+  t_callers[t_frame_next] =
+      g_current_ctx ? g_current_ctx->r[14] : 0;
   t_frame_next = (t_frame_next + 1) % ARC_FRAME_RING;
   ++t_frame_seen;
   if (g_frame_budget && --g_frame_budget <= 0) {
@@ -115,6 +120,11 @@ size_t arc_frame_count(void) {
 uint32_t arc_frame_at(size_t back) {
   if (back >= arc_frame_count()) return 0;
   return t_frames[(t_frame_next + ARC_FRAME_RING - 1 - back) % ARC_FRAME_RING];
+}
+
+uint32_t arc_frame_caller(size_t back) {
+  if (back >= arc_frame_count()) return 0;
+  return t_callers[(t_frame_next + ARC_FRAME_RING - 1 - back) % ARC_FRAME_RING];
 }
 
 void arc_frame_clear(void) { t_frame_next = t_frame_seen = 0; }
