@@ -116,6 +116,20 @@ LONG WINAPI OnFault(EXCEPTION_POINTERS* info) {
   if (kind == 8)
     std::printf("  executing mapped memory means a guest address was called "
                 "as if it were a host function\n");
+  // Which register held the address is what turns a faulting byte into a
+  // value that came from somewhere nameable.
+  if (Arm32Ctx* gc = arc_current_context()) {
+    std::printf("\nguest registers:\n");
+    for (int i = 0; i < 16; i += 4) {
+      std::printf("  ");
+      for (int k = 0; k < 4; ++k)
+        std::printf("r%-2d %08x   ", i + k, gc->r[i + k]);
+      std::printf("\n");
+    }
+    for (int i = 0; i < 16; ++i)
+      if (gc->r[i] == uint32_t(at))
+        std::printf("  the faulting address is in r%d\n", i);
+  }
   if (g_fault_image) ReportTrail(*g_fault_image);
   std::fflush(stdout);
   return EXCEPTION_CONTINUE_SEARCH;
@@ -161,6 +175,15 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   }
 
   InstallFaultHandler(img);
+  {
+    uint32_t lo = 0xFFFFFFFFu, hi = 0;
+    for (const auto& seg : img.segments()) {
+      if (!seg.vmsize || seg.name == "__PAGEZERO") continue;
+      lo = seg.vmaddr < lo ? seg.vmaddr : lo;
+      hi = seg.vmaddr + seg.vmsize > hi ? seg.vmaddr + seg.vmsize : hi;
+    }
+    arc_set_image_range(lo, hi);
+  }
 
   r.shims = InstallLibSystemShims(img);
   r.shims += InstallUIKitShims(img);
@@ -224,6 +247,7 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   // from its entry point stops somewhere describable instead of branching to
   // zero.
   ARC_W(&ctx, 14, 0xDEAD0000u);
+  arc_set_current_context(&ctx);
 
   arc_trace_clear();
   arc_frame_clear();

@@ -42,6 +42,16 @@ uint32_t arc_guest_stack_top(void);
 // than a named refusal.
 int arc_guest_owns(uint32_t addr, uint32_t size);
 
+// The image's own range, so that an address can be checked against everything
+// the guest legitimately holds rather than only against the heap.
+void arc_set_image_range(uint32_t lo, uint32_t hi);
+
+// Whether an address is somewhere the guest could legitimately have got a
+// pointer: the image, the heap, or the stack. Anything else is a value that
+// was never an address, and saying so where it is *used* is far more use than
+// faulting later on whatever it happens to point at.
+int arc_guest_plausible(uint32_t addr);
+
 // How much of the heap has been handed out, for the report on the way down.
 uint32_t arc_guest_used(void);
 uint32_t arc_guest_capacity(void);

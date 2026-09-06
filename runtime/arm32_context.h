@@ -390,6 +390,13 @@ void arc_set_permissive(int on);
 // The frame loop resets it, because a game that is running is *supposed* to
 // enter functions forever -- the budget is about reaching the loop, not about
 // staying in it.
+// The context the guest is running on, so a fault handler can say what was in
+// the registers. A faulting address on its own says which byte was touched;
+// the registers say which value was used as a pointer, and that is usually the
+// difference between a diagnosis and a guess.
+void arc_set_current_context(Arm32Ctx* c);
+Arm32Ctx* arc_current_context(void);
+
 void arc_frame_budget(long entries);
 void arc_frame_budget_reset(void);
 size_t arc_missing_count(void);

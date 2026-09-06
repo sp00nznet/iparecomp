@@ -119,5 +119,20 @@ int arc_guest_owns(uint32_t addr, uint32_t size) {
   return 0;
 }
 
+namespace {
+uint32_t g_image_lo = 0, g_image_hi = 0;
+}  // namespace
+
+void arc_set_image_range(uint32_t lo, uint32_t hi) {
+  g_image_lo = lo;
+  g_image_hi = hi;
+}
+
+int arc_guest_plausible(uint32_t addr) {
+  if (!addr) return 0;
+  if (addr >= g_image_lo && addr < g_image_hi) return 1;
+  return arc_guest_owns(addr, 1);
+}
+
 uint32_t arc_guest_used(void) { return g_next - kHeapBase; }
 uint32_t arc_guest_capacity(void) { return kHeapSize; }

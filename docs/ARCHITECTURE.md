@@ -616,6 +616,37 @@ different bug from an address that was never anything. And it has to be a
 *vectored* handler rather than an unhandled-exception filter, because the C
 runtime installs its own SEH chain and the filter never runs.
 
+### Refuse a bad value where it is used
+
+The text path faulted reading `0x80200593`, and a faulting address on its own
+only says which byte was touched. Three things in order turned that into a
+sentence.
+
+The fault handler prints the guest's registers, so the value can be found in
+them rather than inferred -- it was in r0, r2 and r6, with a selector in r1,
+which is the shape of a message about to be sent.
+
+The runtime then refuses a receiver that is not somewhere the guest could have
+got a pointer: not the image, not the heap, not the stack. That converts a
+segfault into
+
+```
+stopped: objc_msgSend: 0x80200593 is not an object, and it was sent copy
+```
+
+with the frame ring still pointing at `-[SSText setText:]`. The check has to
+come *before* the isa is read, and the first version of it did not, because the
+caller computed the isa in the argument list.
+
+And where an aggregate is returned is now checked rather than assumed. A
+shim returning a `CGRect` writes through a hidden pointer that only exists
+under `objc_msgSend_stret`; reached through the ordinary send it would write
+sixteen bytes over the receiver's own header and produce exactly this kind of
+garbage pointer somewhere else. The runtime records which of the two a send
+came through and those shims refuse the wrong one. It did not fire here, which
+is itself the useful result: that whole class of bug is ruled out rather than
+suspected.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the

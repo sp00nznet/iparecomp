@@ -1,5 +1,6 @@
 #include "objc_runtime.h"
 
+#include "arc_mem.h"
 #include "objc_host.h"
 
 #include <cstdio>
@@ -31,6 +32,7 @@ constexpr uint32_t kCatClassMethods = 12;
 ObjcRuntime g_objc;
 const MachOImage* g_image = nullptr;
 bool g_permissive = false;
+bool g_stret = false;
 std::vector<std::pair<std::string, std::string>> g_missing;
 std::set<std::string> g_missing_seen;
 
@@ -325,6 +327,11 @@ void NoteMessage(uint32_t cls, const char* selector) {
   arc_trace_note(kept.back().c_str());
 }
 
+// `cls` is the class to start the lookup from. Passing zero means "read it out
+// of the receiver" -- which has to happen *after* the receiver is checked,
+// because reading an isa out of a value that was never an object is exactly
+// the fault this is trying to describe. Computing it in the caller's argument
+// list is what made the first version of this guard useless.
 void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   // A message to nil is not an error: it evaluates to zero and that is load
   // bearing in real Objective-C, not a corner case.
@@ -332,6 +339,20 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     ARC_W(c, 0, 0);
     return;
   }
+  // A receiver has to be somewhere the guest could have got a pointer. When it
+  // is not, the value was never an object, and dereferencing it to read an isa
+  // would fault on whatever it happens to address -- somewhere unrelated, with
+  // nothing to say which send was at fault. Refusing here names the selector
+  // and leaves the frame ring pointing at the function that passed it.
+  if (!arc_guest_plausible(receiver)) {
+    char msg[192];
+    std::snprintf(msg, sizeof msg,
+                  "objc_msgSend: %#x is not an object, and it was sent %s",
+                  receiver, SelName(sel) ? SelName(sel) : "(unreadable)");
+    arc_trap(c, msg);
+    return;
+  }
+  if (!cls) cls = ARC_LD32(receiver);
   const char* name = SelName(sel);
   NoteMessage(cls, name);
   const uint32_t imp = g_objc.Lookup(cls, name);
@@ -401,8 +422,8 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
 }
 
 void MsgSend(Arm32Ctx* c) {
-  const uint32_t receiver = ARC_R(c, 0);
-  Send(c, receiver, receiver ? ARC_LD32(receiver) : 0, ARC_R(c, 1));
+  g_stret = false;
+  Send(c, ARC_R(c, 0), 0, ARC_R(c, 1));
 }
 
 void MsgSendSuper2(Arm32Ctx* c) {
@@ -467,14 +488,30 @@ void EnumerationMutation(Arm32Ctx* c) {
 void MsgSendStret(Arm32Ctx* c) {
   // A struct-returning send puts the hidden return pointer in r0, so the
   // receiver and selector shift up by one register.
-  const uint32_t receiver = ARC_R(c, 1);
-  Send(c, receiver, receiver ? ARC_LD32(receiver) : 0, ARC_R(c, 2));
+  g_stret = true;
+  Send(c, ARC_R(c, 1), 0, ARC_R(c, 2));
+  g_stret = false;
 }
 
 }  // namespace
 
+bool SendingStret() { return g_stret; }
+
 void InstallObjcRuntime(const MachOImage& img) {
   g_image = &img;
+  // The receiver guard needs to know what the image occupies, and this is
+  // where the runtime becomes live -- setting it only in Boot left every
+  // address implausible on any path that does not boot, which silently
+  // refused all 88 of the dispatch self-check's messages.
+  {
+    uint32_t lo = 0xFFFFFFFFu, hi = 0;
+    for (const auto& seg : img.segments()) {
+      if (!seg.vmsize || seg.name == "__PAGEZERO") continue;
+      lo = seg.vmaddr < lo ? seg.vmaddr : lo;
+      hi = seg.vmaddr + seg.vmsize > hi ? seg.vmaddr + seg.vmsize : hi;
+    }
+    arc_set_image_range(lo, hi);
+  }
   // Lifted code reaches an import by branching to its stub, so the stub
   // address is the name the runtime knows it by. Registering a *host* function
   // pointer rather than deriving one from the guest address matters: a guest

@@ -82,6 +82,11 @@ static size_t t_frame_next, t_frame_seen;
 // target from this one -- gating the definition on it means a lifted program
 // built with frames cannot link against a library built without, which is
 // exactly the configuration anyone would try first.
+static Arm32Ctx* g_current_ctx;
+
+void arc_set_current_context(Arm32Ctx* c) { g_current_ctx = c; }
+Arm32Ctx* arc_current_context(void) { return g_current_ctx; }
+
 static long g_frame_budget = 0;
 static long g_frame_budget_start = 0;
 

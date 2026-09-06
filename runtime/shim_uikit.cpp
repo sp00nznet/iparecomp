@@ -45,6 +45,11 @@ uint32_t Bits(float f) {
 // hidden pointer in r0 and the callee fills it. objc_msgSend_stret is the
 // whole reason that path exists.
 void ReturnRect(Arm32Ctx* c, float x, float y, float w, float h) {
+  if (!SendingStret()) {
+    arc_trap(c, "a rectangle-returning method was reached through the ordinary "
+                "objc_msgSend; writing the result would land on the receiver");
+    return;
+  }
   const uint32_t out = ARC_R(c, 0);
   if (!out) return;
   ARC_ST32(out + 0, Bits(x));
@@ -79,6 +84,11 @@ void ScreenBounds(Arm32Ctx* c) {
 // trail says so, which is the only reliable way to tell. Under stret the
 // hidden pointer takes r0 and the receiver moves to r1.
 void ReturnPoint(Arm32Ctx* c, float x, float y) {
+  if (!SendingStret()) {
+    arc_trap(c, "a point-returning method was reached through the ordinary "
+                "objc_msgSend; writing the result would land on the receiver");
+    return;
+  }
   const uint32_t out = ARC_R(c, 0);
   if (!out) return;
   ARC_ST32(out + 0, Bits(x));

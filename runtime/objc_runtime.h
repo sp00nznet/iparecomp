@@ -109,6 +109,15 @@ class ObjcRuntime {
 // The process-wide runtime the lifted code's `objc_msgSend` reaches.
 ObjcRuntime& Objc();
 
+// Whether the send currently being answered came through objc_msgSend_stret.
+//
+// A shim that returns an aggregate writes through a hidden pointer in r0, and
+// that is only r0's meaning under stret -- through the ordinary send r0 is the
+// receiver, so the same code would write sixteen bytes over the object's own
+// header and produce a garbage isa that faults somewhere else entirely. The
+// convention is not guessable from the type, so it is recorded and checked.
+bool SendingStret();
+
 // Keep going when a framework class has no implementation for a selector,
 // answering nil and writing it down, rather than stopping at the first one.
 //

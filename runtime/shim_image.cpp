@@ -142,6 +142,11 @@ void ImageNamed(Arm32Ctx* c) {
 void ImageSize(Arm32Ctx* c) {
   // -[UIImage size] is a CGSize: two floats, returned through the hidden
   // pointer like every other aggregate.
+  if (!SendingStret()) {
+    arc_trap(c, "-[UIImage size] was reached through the ordinary "
+                "objc_msgSend; writing the result would land on the receiver");
+    return;
+  }
   const uint32_t out = ARC_R(c, 0);
   auto it = Images().find(ARC_R(c, 1));
   const float w = it == Images().end() ? 0.0f : float(it->second.width);
