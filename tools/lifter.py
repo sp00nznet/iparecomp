@@ -88,7 +88,22 @@ def form(ins) -> str:
         elif op.type == ca.ARM_OP_IMM:
             kinds.append("i")
         elif op.type == ca.ARM_OP_MEM:
-            kinds.append("[m]")
+            # The addressing mode is part of the shape, not an incidental
+            # detail. Collapsing every `ldr` into one key meant the harvester
+            # took whichever encodings came first -- all immediate-offset ones
+            # -- and a scaled register index was never sampled at all. A whole
+            # addressing mode went untested, and the lost `lsl #2` on every
+            # array subscript in the binary lived there.
+            mode = "[m"
+            if op.mem.index:
+                mode += "+r"
+                if op.shift.type:
+                    mode += f"<{SFT[op.shift.type]}>"
+                elif op.mem.lshift:
+                    mode += "<lsl>"
+            elif op.mem.disp:
+                mode += "+d"
+            kinds.append(mode + "]")
         elif op.type == ca.ARM_OP_FP:
             kinds.append("f")
         else:
@@ -469,11 +484,19 @@ class Lifter:
             sub = ops[mem_index + 1].subtracted
         elif mem.index:
             idx = self.read(ins, self.reg(ins, mem.index))
+            # The scale of a register index lives in the operand's shift, and
+            # `mem.lshift` is zero even for `[r3, r6, lsl #2]`. Testing only
+            # lshift silently drops the scale on every scaled index in the
+            # binary -- which is to say on array subscripting -- and the result
+            # reads one byte into an element instead of one element along.
             shift = ops[mem_index].shift
-            if shift.type and SFT[shift.type] != "lsl":
-                name = SFT[shift.type]
-                idx = (f"arc_rrx({idx}, c->cf).value" if name == "rrx"
-                       else f"arc_{name}({idx}, {shift.value}u, c->cf).value")
+            name = SFT.get(shift.type) if shift.type else None
+            if name == "rrx":
+                idx = f"arc_rrx({idx}, c->cf).value"
+            elif name and name != "lsl":
+                idx = f"arc_{name}({idx}, {shift.value}u, c->cf).value"
+            elif name == "lsl" and shift.value:
+                idx = f"({idx} << {shift.value})"
             elif mem.lshift:
                 idx = f"({idx} << {mem.lshift})"
             off = idx

@@ -4,8 +4,8 @@
 > applications. Bring your own `.ipa`.
 
 **Status: the game runs, and says so.** All 626 of Canabalt's functions
-lift to C; 62,421 per-instruction and 3,000 whole-function differential cases
-agree with Unicorn. The image maps at its own link address with a zero slide,
+lift to C; 23,111 per-instruction cases over 191 operand forms and 2,967
+whole-function cases agree with Unicorn. The image maps at its own link address with a zero slide,
 `objc_msgSend` dispatches into lifted code, and the guest now runs from
 `_start` through `applicationDidFinishLaunching:` and the whole flixel setup to
 `exit(0)`. What it asks for on the way is measured, not guessed: one run names
@@ -201,9 +201,12 @@ enough to lift in full and check against an emulator.
       `ldm`/`pop` writing PC recognised as return or indirect branch, and the
       whole VFP surface these binaries use. The output compiles clean at
       `-Wall`.
-- [x] **M5 — differential test.** Per instruction: 62,421 cases over 159
+- [x] **M5 — differential test.** Per instruction: 23,111 cases over 191
       operand forms, 100% agreement with Unicorn on registers, flags, the
-      vector file and memory.
+      vector file and memory. The form count went up and the case count went
+      down when the *addressing mode* became part of a form's identity, which
+      is the whole lesson: a form that is never sampled is not tested however
+      many cases run.
 
       Whole functions **with calls** too, which is most of them: **619 of
       626**, by neutralising the imports identically on both sides -- reaching
@@ -279,21 +282,17 @@ enough to lift in full and check against an emulator.
       - [x] NSArray and NSMutableArray for real, including fast enumeration,
             because `for (x in array)` is everywhere and an array that stays
             silently empty is a menu with no buttons in it.
-      - [ ] Text layout still stops, and the search has moved off the lifter.
-            A garbage string reaches `-[SSText setText:]` through four
-            `+[FlxText textWithFrame:...]` forwarders, all of which the harness
-            now covers and all of which pass. `ARC_TRACE_MSG` took it further:
-            passed by no earlier message, returned by no message, and not a
-            constant in the image. It is uninitialised memory --
-            `-[MenuState init]` reads a menu-label array whose third slot was
-            never written, with a loop bound that came from a message return.
-            `ARC_TRACE_STACK` showed the caller's whole frame, and
-            `arc_guest_find` showed the value exists only on the stack and
-            nowhere in the heap. Four hypotheses are eliminated -- the lifter,
-            the stret convention, a missing `.strings` table, and a heap array
-            read out of bounds. The efficient way to finish it is to read
-            `-[MenuState init]` in the published source, which is the reason
-            this game was picked.
+      - [x] Text layout: fixed, and it was a lifting bug --
+            `ldr r5, [r3, r6, lsl #2]` was emitted without the `lsl #2`, so
+            every array subscript in the binary read one byte into an element
+            instead of one element along. Capstone reports that scale in the
+            operand's `shift` and leaves `mem.lshift` zero. The harness missed
+            it because `form()` rendered every addressing mode as `[m]`, so a
+            scaled register index was never sampled; it is a distinct shape
+            now, 159 forms became 191, and putting the bug back makes the
+            harness report it. Found by reading `-[MenuState init]` in the
+            published source, which is why this game was chosen.
+      - [ ] The run now stops further along.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite

@@ -341,10 +341,14 @@ is fortunate, because there is none. The independence is the whole point --
 checking the emitters against capstone would prove nothing, since capstone is
 where they get their operands.
 
-Per-instruction is done: 5,985 cases over 159 operand forms, comparing
+Per-instruction is done: 23,111 cases over 191 operand forms, comparing
 registers, flags, the vector file and memory, at 100% agreement. Whole
-functions are next, and cover the control flow the first harness excludes by
-construction.
+functions cover the control flow that harness excludes by construction.
+
+Both numbers are smaller than they used to be and mean more: the operand forms
+went from 159 to 191 once the *addressing mode* became part of a form's
+identity, which is the subject of [Why 62,421 agreeing cases did not catch
+it](#why-62421-agreeing-cases-did-not-catch-it). Case count is not coverage.
 
 Three details of the harness are load-bearing, and two of them cost a run to
 learn:
@@ -745,31 +749,59 @@ argument area, and **nowhere in the heap at all**. So it was never an element
 of an allocated array of strings, which is what the read that produced it
 looked like.
 
-### Where this one stands, and the honest way to finish it
+### The bug: a dropped scale on every array subscript
 
-The remaining chain of facts is narrow and consistent:
+It was a lifting bug after all, and the way it was finally found is the lesson.
 
-- `-[MenuState init]` loads it with `ldr r5, [r3, r6, lsl #2]` at `0xace4`,
-  with `r6 == 2` -- the third time round a loop.
-- `r5` is already wrong at the very next message, so the load produced it
-  rather than a callee clobbering a callee-saved register.
-- It is returned by no message, passed by no earlier message, and is not a
-  constant anywhere in the image.
-- It exists only on the stack, and only where it was subsequently copied.
+`ldr r5, [r3, r6, lsl #2]` was being emitted as `ARC_R(c, 3) + ARC_R(c, 6)`.
+The `lsl #2` was gone, so every scaled register index -- which is to say every
+array subscript in the binary -- read one *byte* into an element instead of one
+element along. Reading four bytes at `buf + 1` rather than `buf + 4` returns
+the tail of one pointer and the head of the next, which is exactly what
+`0x80200593` was: the bytes of `0x20059360` and `0x20059380` overlapping.
 
-Four hypotheses have been tested and eliminated: the lifter (the whole chain is
-now differentially verified), the stret calling convention (guarded, does not
-fire), a missing `.strings` table (the bundle's only one belongs to the
-Settings bundle), and a heap array read out of bounds (the value is not in the
-heap).
+The cause is a detail of capstone's operand model. For `[r3, r6, lsl #2]` it
+reports the scale in the *operand's* `shift`, and leaves `mem.lshift` at zero.
+The emitter tested `mem.lshift`, found nothing, and applied no shift at all:
 
-The efficient way to finish it is not more tracing. Canabalt was chosen as the
-first target *because its source is public* -- that is the whole argument in
-[Calibrating the emitter](#calibrating-the-emitter) -- and `-[MenuState init]`
-can simply be read. What the array is, what fills it, and what bounds the loop
-are all facts in that source rather than things to infer from a disassembly.
-Reaching for the ground truth is the point of having picked this game, and four
-turns of inference is exactly the situation it was meant to avoid.
+```
+  op1 MEM base=r3 index=r6 lshift=0 scale=1 disp=0
+       op.shift.type=2 op.shift.value=2
+```
+
+That is the cost of emitting from someone else's decoder: their model has to be
+understood, not assumed, and a field that is zero is not the same as a field
+that is absent.
+
+### Why 62,421 agreeing cases did not catch it
+
+This is the more important half, because the harness was supposed to make this
+class of bug impossible.
+
+`form()` -- the key the harvester groups encodings by, so that each distinct
+shape gets tested -- rendered *every* memory operand as `[m]`. So `ldr r0,
+[r1, #4]` and `ldr r5, [r3, r6, lsl #2]` were the same shape. The harvester
+takes a handful of encodings per shape, took whichever came first, and those
+were all immediate-offset ones. **An entire addressing mode was never sampled.**
+
+The fix is to make the addressing mode part of the shape: `[m]`, `[m+d]`,
+`[m+r]`, `[m+r<lsl>]`. That takes Canabalt from 159 forms to 191, and with the
+bug deliberately put back the harness now reports it immediately:
+
+```
+  ldr r,[m+r<lsl>]   17  ldr r6, [r0, fp, lsl #2]
+                         r6 = 0xc21fbead, expected 0x30003d18
+```
+
+Which is the test worth keeping: a harness that would not have caught a bug is
+not evidence about that bug, and the only way to know the difference is to
+reintroduce it and watch.
+
+Seeding matters too, and less than it looked. Every register held a pointer, so
+`base + index * 4` always landed outside scratch, faulted in the oracle, and
+the case was *dropped* rather than compared. A third of the registers are small
+values now. That alone did not surface the bug -- the form key did -- but a
+dropped case is a silent one either way.
 
 ## The shim surface
 

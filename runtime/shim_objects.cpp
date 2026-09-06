@@ -416,6 +416,12 @@ void CountByEnumerating(Arm32Ctx* c) {
   ARC_ST32(state + 0, 1);     // state: this batch has been handed out
   ARC_ST32(state + 4, buf);   // itemsPtr
   ARC_ST32(state + 8, buf + n * 4);  // mutationsPtr
+  if (std::getenv("ARC_TRACE_MSG")) {
+    std::printf("[enum] state=%#x items=%#x n=%u :", state, buf, n);
+    for (uint32_t i = 0; i < n && i < 12; ++i)
+      std::printf(" %08x", ARC_LD32(buf + i * 4));
+    std::printf("\n");
+  }
   ARC_W(c, 0, n);
 }
 

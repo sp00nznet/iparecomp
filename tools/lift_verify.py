@@ -308,10 +308,18 @@ def seed(rng: random.Random, pointerish: bool):
     """
     regs = []
     for i in range(15):
-        if pointerish:
-            regs.append(SCRATCH_MID + rng.randrange(-0x400, 0x400, 4))
-        else:
+        if not pointerish:
             regs.append(rng.getrandbits(32))
+        elif i % 3 == 2:
+            # A small value, because a scaled index is a small value. Seeding
+            # every register with a pointer means `[rN, rM, lsl #2]` always
+            # computes base + a pointer, which lands outside scratch, faults in
+            # the oracle, and gets the case *dropped* -- so the whole form goes
+            # untested. That is how a lost `lsl #2` on every array subscript in
+            # the binary survived 62,421 agreeing cases.
+            regs.append(rng.randrange(0, 16))
+        else:
+            regs.append(SCRATCH_MID + rng.randrange(-0x400, 0x400, 4))
     regs.append(0)  # r15, which lifted code never reads
     regs[13] = SCRATCH_MID  # sp, so push/pop have room in both directions
     flags = tuple(rng.getrandbits(1) for _ in range(4))
