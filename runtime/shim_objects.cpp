@@ -342,6 +342,45 @@ void ArrayWithObjects(Arm32Ctx* c) {
   ARC_W(c, 0, a);
 }
 
+// The copy-from-an-array family. `arrayWithArray:` and `addObjectsFromArray:`
+// were both wired to ArrayWithObject, which stores the *source array* as a
+// single element -- a one-element array whose element is an array, which reads
+// back as a count of 1 and an objectAtIndex: that returns something of the
+// wrong class. Same argument as the collections themselves: the failure looks
+// like a rendering bug rather than a missing method.
+void Extend(uint32_t dst, uint32_t src) {
+  auto it = Arrays().find(src);
+  if (it == Arrays().end()) return;
+  auto& out = Arrays()[dst];
+  // A copy of the source, not a reference to it, and by value because `out`
+  // and `it->second` are the same vector when a guest copies an array onto
+  // itself.
+  const std::vector<uint32_t> from = it->second;
+  out.insert(out.end(), from.begin(), from.end());
+}
+
+void ArrayWithArray(Arm32Ctx* c) {
+  const uint32_t a = MakeArray("NSMutableArray");
+  if (a) Extend(a, ARC_R(c, 2));
+  ARC_W(c, 0, a);
+}
+
+// -initWithArray: arrives on an object `alloc` already produced, so the
+// receiver is returned rather than a new one.
+void ArrayInitWithArray(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0);
+  if (self) {
+    Arrays()[self].clear();
+    Extend(self, ARC_R(c, 2));
+  }
+  ARC_W(c, 0, self);
+}
+
+void ArrayAddObjectsFromArray(Arm32Ctx* c) {
+  Extend(ARC_R(c, 0), ARC_R(c, 2));
+  ARC_W(c, 0, 0);
+}
+
 void ArrayCount(Arm32Ctx* c) {
   auto it = Arrays().find(ARC_R(c, 0));
   ARC_W(c, 0, it == Arrays().end() ? 0 : uint32_t(it->second.size()));
@@ -775,7 +814,10 @@ const Entry kEntries[] = {
     {"NSArray", true, "array", ArrayNew},
     {"NSArray", true, "arrayWithObject:", ArrayWithObject},
     {"NSArray", true, "arrayWithObjects:", ArrayWithObjects},
-    {"NSArray", true, "arrayWithArray:", ArrayWithObject},
+    {"NSArray", true, "arrayWithArray:", ArrayWithArray},
+    {"NSArray", false, "initWithArray:", ArrayInitWithArray},
+    {"NSMutableArray", true, "arrayWithArray:", ArrayWithArray},
+    {"NSMutableArray", false, "initWithArray:", ArrayInitWithArray},
     {"NSArray", false, "count", ArrayCount},
     {"NSArray", false, "objectAtIndex:", ArrayObjectAtIndex},
     {"NSArray", false, "lastObject", ArrayLastObject},
@@ -787,7 +829,8 @@ const Entry kEntries[] = {
     {"NSMutableArray", true, "array", ArrayNew},
     {"NSMutableArray", true, "arrayWithCapacity:", ArrayNew},
     {"NSMutableArray", false, "addObject:", ArrayAddObject},
-    {"NSMutableArray", false, "addObjectsFromArray:", ArrayAddObject},
+    {"NSMutableArray", false, "addObjectsFromArray:",
+     ArrayAddObjectsFromArray},
     {"NSMutableArray", false, "removeObject:", ArrayRemoveObject},
     {"NSMutableArray", false, "removeAllObjects", ArrayRemoveAll},
 
