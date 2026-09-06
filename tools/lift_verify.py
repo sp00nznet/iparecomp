@@ -204,6 +204,8 @@ static void* reserve(uintptr_t at, size_t size, int guard_low) {
 #endif
 }
 
+static void ArcVerifyStub(Arm32Ctx* c) { c->r[0] = 0; }
+
 int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "--size") == 0) {
     printf("%u\n", (unsigned)sizeof(Arm32Ctx));
@@ -233,6 +235,19 @@ int main(int argc, char** argv) {
   unsigned char* clean_image = (unsigned char*)malloc(@IMAGE_SPAN@);
   unsigned char* clean_scratch = (unsigned char*)malloc(@SCRATCH_SIZE@);
   memcpy(clean_image, image, @IMAGE_SPAN@);
+
+  /* Every import stub answers the same way on both sides: r0 = 0, and
+     return. A caller cannot be tested at all otherwise -- nearly every method
+     in an Objective-C binary sends a message, so its call tree always reaches
+     one -- and what matters is not what the callee does but that the two sides
+     do the same thing. */
+  uint32_t stub_count = 0;
+  if (fread(&stub_count, 4, 1, in) != 1) return 2;
+  for (uint32_t i = 0; i < stub_count; ++i) {
+    uint32_t at = 0;
+    if (fread(&at, 4, 1, in) != 1) return 2;
+    arc_register_ctx_native(at, "stub", ArcVerifyStub);
+  }
 
   Arm32Ctx c;
   jmp_buf recovery;
@@ -442,6 +457,7 @@ def main() -> None:
     out_path = os.path.join(workdir, "out.bin")
     with open(in_path, "wb") as fh:
         fh.write(image_full[IMAGE_FLOOR - IMAGE_BASE:])
+        fh.write(struct.pack("<I", 0))
         for (regs, flags, vec, fpscr, scratch) in states:
             fh.write(pack_ctx(regs, flags, vec, fpscr, ctx_size))
             fh.write(scratch)

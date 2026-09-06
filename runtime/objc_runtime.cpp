@@ -4,6 +4,7 @@
 #include "objc_host.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <set>
@@ -355,6 +356,29 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   if (!cls) cls = ARC_LD32(receiver);
   const char* name = SelName(sel);
   NoteMessage(cls, name);
+  // The message equivalent of ARC_TRACE_CALLS. A name in the trail says a
+  // message was sent; the arguments say whether what it carried made sense,
+  // which is the difference between watching a value arrive wrong and
+  // inferring where it went wrong. Set to a substring, or "*" for everything.
+  {
+    static const char* filter;
+    static bool checked;
+    if (!checked) {
+      filter = std::getenv("ARC_TRACE_MSG");
+      checked = true;
+    }
+    if (filter && name && (!*filter || *filter == '*' || strstr(name, filter))) {
+      const ObjcClass* k = g_objc.ClassAt(cls);
+      const char* cn = k ? k->name.c_str() : HostClassName(cls);
+      const uint32_t sp = ARC_SP(c);
+      std::printf("[msg] %s[%s %s] r2=%#x r3=%#x sp0=%#x sp1=%#x sp2=%#x\n",
+                  k && k->meta ? "+" : "-", cn ? cn : "?", name,
+                  ARC_R(c, 2), ARC_R(c, 3),
+                  arc_guest_owns(sp, 4) ? ARC_LD32(sp) : 0,
+                  arc_guest_owns(sp + 4, 4) ? ARC_LD32(sp + 4) : 0,
+                  arc_guest_owns(sp + 8, 4) ? ARC_LD32(sp + 8) : 0);
+    }
+  }
   const uint32_t imp = g_objc.Lookup(cls, name);
   if (imp) {
     // Registers are already arranged as the guest left them: receiver in r0,

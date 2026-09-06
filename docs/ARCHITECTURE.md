@@ -668,22 +668,48 @@ That is the difference between "something passed a bad string" and a named
 chain of four convenience factories, each forwarding a longer stack argument
 list than the last.
 
-### The differential harness has a shape, and bugs hide outside it
+### Testing a caller means stubbing its callees on both sides
 
-Which is the more useful finding. `lift_verify_fn.py` tests *self-contained*
-functions -- no calls, because a call would run arbitrarily deep and reach an
-unlifted stub. 150 of Canabalt's 626 qualify, and all 150 agree with Unicorn.
+The harness used to test only *self-contained* functions -- no calls at all,
+because a call would run arbitrarily deep and reach an unlifted stub. That was
+150 of Canabalt's 626, and it left every argument forwarder, initialiser and
+wrapper untested: exactly the shape where a lifting bug survives.
 
-Every function in the chain above makes calls. **None of them has ever been
-differentially tested**, and they are exactly the shape where a lifting bug
-would survive: a seven-argument method whose arguments mostly arrive on the
-stack, forwarded through four levels, each rebuilding the frame.
+The first attempt at widening it was to allow calls whose whole tree is
+lifted. That added **nothing**. Every non-leaf function in an Objective-C
+binary sends a message, so its call tree always reaches `objc_msgSend`, and
+`objc_msgSend` is an import.
 
-That is not a reason to distrust the 150. It is a reason to notice that "100%
-agreement" is a statement about a subset, and to say which subset. Extending
-the harness to functions with calls -- by stubbing the callees, or letting the
-oracle run them too -- is the next thing worth building, and it is worth
-building before writing more shims.
+What works is to neutralise the imports identically on both sides: reaching one
+sets r0 to zero and returns, on the lifted side through a registered native and
+in the oracle through a code hook over the stub range. What the callee would
+have done does not matter; that the two sides do the same thing does. That took
+the harness from **152 functions to 619 of 626**, and all of them agree.
+
+The result is worth more than the number. The bug being chased at the time ran
+through four `+[FlxText textWithFrame:...]` forwarders and a seven-argument
+initialiser, all of which are now covered and all of which pass -- so the
+lifter is not where the bad value comes from, and the search moved to the
+runtime. A harness that cannot reach the code under suspicion cannot exonerate
+it either.
+
+### Tracing messages, not just calls
+
+`ARC_TRACE_CALLS` prints the host calls a guest makes; `ARC_TRACE_MSG` does the
+same for Objective-C messages, matched on a substring of the selector, with the
+argument registers and the first stack words:
+
+```
+[msg] +[FlxText textWithFrame:text:color:font:size:] r2=0x43c40000 r3=0x44080000
+      sp0=0x43720000 sp1=0x41800000 sp2=0x80200593
+```
+
+A name in the trail says a message was sent. The arguments say whether what it
+carried made sense, which is the difference between watching a value arrive
+wrong and inferring where it went wrong. Four traces narrowed a garbage string
+from "somewhere in text layout" to "already wrong at the top of the chain, and
+never passed in any earlier message" -- which is what rules out the forwarders
+and points at whatever computed it.
 
 ## The shim surface
 

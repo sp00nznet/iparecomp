@@ -91,6 +91,7 @@ iparecomp is a lifting project from day one.
 | `runtime/arm32_context.h` | Guest CPU state and the operations lifted code emits — the emitter's target. Barrel shifter with its separate carry-out, unpacked flags, condition predicates, interworking helpers. |
 | `tools/lifter.py` | Lifts armv6/armv7 and Thumb-2 to C, one C function per guest function. `--report` says what fraction of *functions* lift completely, which is the number that decides whether a build is possible. |
 | `tools/lift_verify.py` | Differential-tests lifted instructions against Unicorn on encodings harvested from the real binary, with the image mapped at the same address on both sides. |
+| `tools/lift_verify_fn.py` | Differential-tests whole lifted functions, including ones that call others, by neutralising the imports identically on both sides. 619 of Canabalt's 626. |
 | `runtime/objc_runtime` | Realizes the class table out of `__DATA` and answers `objc_msgSend` by selector, dispatching into lifted code. Reports which selectors the binary sends that nothing in it implements -- the framework contract. |
 | `tools/objc_verify.py` | Checks that runtime's realized table against `objc_dump.py`, which reads the same ABI independently. |
 | `runtime/arc_boot` | Starts the guest and says where it stopped: the trap, a backtrace through lifted code, and the trail of calls out to the host. |
@@ -202,14 +203,17 @@ enough to lift in full and check against an emulator.
       `-Wall`.
 - [x] **M5 — differential test.** Per instruction: 62,421 cases over 159
       operand forms, 100% agreement with Unicorn on registers, flags, the
-      vector file and memory. Whole functions: 3,000 cases over 150 of
-      Canabalt's 152 *self-contained* functions, also 100%.
+      vector file and memory.
 
-      Worth stating precisely, because it is a claim about a subset: a
-      function that calls another is not tested, since a call would run
-      arbitrarily deep and reach an unlifted stub. That leaves 476 of the 626
-      unverified, and they are the ones with the most going on -- see
-      [The differential harness has a shape](docs/ARCHITECTURE.md#the-differential-harness-has-a-shape-and-bugs-hide-outside-it).
+      Whole functions **with calls** too, which is most of them: **619 of
+      626**, by neutralising the imports identically on both sides -- reaching
+      one sets r0 to zero and returns, on the lifted side through a registered
+      native and in the oracle through a code hook. What the callee would have
+      done does not matter; that the two sides do the same thing does.
+
+      Allowing only calls whose whole tree is lifted added nothing, because
+      every non-leaf function in an Objective-C binary sends a message and
+      `objc_msgSend` is an import.
 - [x] **M6 — the slide.** These binaries are non-PIE with an empty rebase
       table, so nothing records which words are pointers and the image cannot
       be slid at all -- but its link address is below the 64 KB floor every
@@ -276,12 +280,11 @@ enough to lift in full and check against an emulator.
             because `for (x in array)` is everywhere and an array that stays
             silently empty is a menu with no buttons in it.
       - [ ] Text layout still stops. A garbage string reaches
-            `-[SSText setText:]`, and the call ring now names the chain that
-            fed it: four `+[FlxText textWithFrame:...]` convenience factories,
-            each forwarding a longer stack argument list than the last. None
-            of them is covered by the differential harness, because they all
-            make calls -- which is the next thing to fix, and worth fixing
-            before writing more shims.
+            `-[SSText setText:]` through four `+[FlxText textWithFrame:...]`
+            forwarders -- all of which the harness now covers and all of which
+            pass, so the lifter is not the source. `ARC_TRACE_MSG` shows the
+            value already wrong at the top of the chain and in no earlier
+            message, so whatever computes it is next.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite

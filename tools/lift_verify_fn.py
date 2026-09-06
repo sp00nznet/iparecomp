@@ -17,14 +17,23 @@ jumped over one lands where it should.
     python tools/lift_verify_fn.py Canabalt.ipa --generated ../canabaltrecomp/generated
     python tools/lift_verify_fn.py Canabalt.ipa --generated gen/ --count 120
 
-Only self-contained functions are tested. A call would run arbitrarily deep and
-reach an unlifted stub, and an indirect branch has nothing to resolve against
-here, so both sides would be comparing a trap to a fault.
+A function is tested when its *whole call tree* is lifted. Both sides then run
+the same code -- the oracle by executing the callee's instructions, the lifted
+side by calling the C function it became -- so a direct call is no obstacle.
+What still cannot be followed is anything that leaves: an indirect branch, a
+call to something never lifted, or an instruction with no emitter. There the
+two sides would be comparing a trap to a fault.
+
+That distinction matters more than it sounds. Restricting this to functions
+that call *nothing* covered 150 of Canabalt's 626, and left every argument
+forwarder, every initialiser and every wrapper untested -- which is where a
+lifting bug has the most room to hide.
 """
 from __future__ import annotations
 
 import argparse
 import glob
+import re
 import os
 import random
 import struct
@@ -38,7 +47,7 @@ import lift_verify as V  # noqa: E402
 
 try:
     from unicorn import Uc, UC_ARCH_ARM, UC_MODE_ARM, UC_MODE_THUMB, UcError
-    from unicorn import UC_PROT_ALL
+    from unicorn import UC_PROT_ALL, UC_HOOK_CODE
     from unicorn import arm_const as uc
 except ImportError as e:
     sys.exit(f"need unicorn: pip install unicorn ({e})")
@@ -47,42 +56,83 @@ except ImportError as e:
 # rather than a fetch fault that has to be told apart from a real one.
 SENTINEL = 0x50000000
 # A runaway function must end the case, not the run.
-MAX_STEPS = 200_000
+MAX_STEPS = 2_000_000
 
 
-def self_contained(lf: L.Lifter, addr: int, size: int, body: bytes,
-                   thumb: bool) -> bool:
-    """Whether a function can be run in isolation.
+def survey(lf: L.Lifter, code: bytes, text_addr: int, fns):
+    """{address: (functions it calls, whether it leaves the lifted world)}.
 
-    Anything that leaves -- a call, an indirect branch, a supervisor call --
-    takes the test somewhere neither side can follow. `bx lr` and a stack pop
-    into PC are returns and stay.
+    A direct call is fine to test through: both sides run the same code, the
+    oracle by executing it and the lifted side by calling the C function. What
+    cannot be followed is anything that leaves -- an indirect branch, a call to
+    a target that was never lifted, a supervisor call, or an instruction with
+    no emitter. `bx lr` and a stack pop into PC are returns and stay.
     """
-    lf.thumb = thumb
-    insns = lf.decode(body, addr, thumb)
-    live = lf.reachable(insns, addr)
-    if not live:
-        return False
-    for a in sorted(live):
-        ins = insns[a]
-        try:
-            code = lf.instruction(ins, live)
-        except L.Unsupported:
+    out = {}
+    for a, size, thumb in fns:
+        lf.thumb = thumb
+        insns = lf.decode(code[a - text_addr:a - text_addr + size], a, thumb)
+        live = lf.reachable(insns, a)
+        calls, escapes = set(), not live
+        for adr in sorted(live):
+            ins = insns[adr]
+            try:
+                body = lf.instruction(ins, live)
+            except L.Unsupported:
+                escapes = True
+                break
+            if "arc_dispatch" in body or "arc_trap" in body:
+                escapes = True
+                break
+            for m in re.finditer(r"fn_([0-9a-f]{8})\(c\)", body):
+                calls.add(int(m.group(1), 16))
+        out[a] = (calls, escapes)
+    return out
+
+
+def testable(info: dict, defined: set[int], stubs: set[int],
+             start: int) -> bool:
+    """Whether a function's whole call tree can be run on both sides.
+
+    This is what takes the harness past leaf functions. A caller is only
+    testable if everything it reaches is: one unlifted callee anywhere in the
+    tree and the two sides diverge at it, the oracle executing the real
+    instructions while the lifted side traps.
+    """
+    seen, work = set(), [start]
+    while work:
+        a = work.pop()
+        if a in seen:
+            continue
+        seen.add(a)
+        if a in stubs:
+            # An import, neutralised identically on both sides. Not something
+            # to follow, and no longer a reason to skip the caller.
+            continue
+        if a not in info or a not in defined:
             return False
-        if "fn_" in code or "arc_dispatch" in code or "arc_trap" in code:
+        calls, escapes = info[a]
+        if escapes:
             return False
+        work.extend(calls)
     return True
 
 
 def pick(lf: L.Lifter, code: bytes, text_addr: int, fns, count: int,
-         available: set[int], rng: random.Random):
-    ok = []
+         available: set[int], stubs: set[int], rng: random.Random,
+         leaves_only: bool = False):
+    info = survey(lf, code, text_addr, fns)
+    ok, leaf = [], 0
     for a, size, thumb in fns:
-        if a not in available:
+        if a not in available or not testable(info, available, stubs, a):
             continue
-        chunk = code[a - text_addr:a - text_addr + size]
-        if self_contained(lf, a, size, chunk, thumb):
-            ok.append((a, size, thumb))
+        if not info[a][0]:
+            leaf += 1
+        elif leaves_only:
+            continue
+        ok.append((a, size, thumb))
+    print(f"  {len(ok):,} testable of {len(fns):,}: {leaf:,} call nothing, "
+          f"{len(ok) - leaf:,} have a fully lifted call tree")
     rng.shuffle(ok)
     return ok[:count] if count else ok
 
@@ -100,7 +150,7 @@ def generated_functions(generated: str) -> set[int]:
 
 
 def run_oracle(addr: int, thumb: bool, regs, flags, vec, fpscr, scratch,
-               image, image_size, link_base):
+               image, image_size, link_base, stubs=frozenset()):
     """Unicorn's answer for a whole function, or None if it did not return.
 
     A function that faults or runs away is not a fair comparison: the lifted
@@ -130,6 +180,21 @@ def run_oracle(addr: int, thumb: bool, regs, flags, vec, fpscr, scratch,
     for i, sreg in enumerate(V.UC_S):
         mu.reg_write(sreg, (vec[i // 2] >> (32 * (i % 2))) & 0xFFFFFFFF)
     mu.reg_write(uc.UC_ARM_REG_FPSCR, fpscr)
+    # The oracle's half of the same bargain: reaching a stub sets r0 and
+    # returns, exactly as the lifted side's registered native does. Without
+    # this the emulator would execute the stub's real instructions, which
+    # branch through a pointer dyld was supposed to fill in.
+    if stubs:
+        lo, hi = min(stubs), max(stubs) + 4
+
+        def leave(engine, address, size, _):
+            if address in stubs:
+                engine.reg_write(uc.UC_ARM_REG_R0, 0)
+                engine.reg_write(uc.UC_ARM_REG_PC,
+                                 engine.reg_read(uc.UC_ARM_REG_LR))
+
+        mu.hook_add(UC_HOOK_CODE, leave, begin=lo, end=hi)
+
     entry = V.IMAGE_BASE + (addr - link_base)
     try:
         mu.emu_start(entry | (1 if thumb else 0), SENTINEL, count=MAX_STEPS)
@@ -159,6 +224,8 @@ def main() -> None:
                     help="how many self-contained functions to test")
     ap.add_argument("--seeds", type=int, default=6, help="states per function")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--leaves-only", action="store_true",
+                    help="only functions that call nothing, as before")
     args = ap.parse_args()
 
     exe_name, link_base, text_addr, code, fns = L.load(args.binary, args.slice)
@@ -168,11 +235,14 @@ def main() -> None:
 
     defined = generated_functions(args.generated)
     rng = random.Random(args.seed)
-    chosen = pick(lf, code, text_addr, fns, args.count, defined, rng)
+    starts = {a for a, _, _ in fns}
+    stubs = defined - starts
+    chosen = pick(lf, code, text_addr, fns, args.count, defined, stubs, rng,
+                  args.leaves_only)
     if not chosen:
         sys.exit("no self-contained functions to test")
-    print(f"{exe_name}: {len(chosen):,} self-contained functions of "
-          f"{len(fns):,}, {args.seeds} states each")
+    print(f"{exe_name}: testing {len(chosen):,} functions, "
+          f"{args.seeds} states each")
 
     # Every mapped segment, at its own vmaddr, exactly as the
     # loader would lay it out -- a function reaching a global
@@ -211,7 +281,7 @@ def main() -> None:
         # report every such function as wrong.
         st[0][14] = SENTINEL
         oracle = run_oracle(a, thumb, *st[:4], st[4], image_full, image_size,
-                            link_base)
+                            link_base, stubs)
         if oracle is None:
             continue
         live.append(case)
@@ -228,6 +298,10 @@ def main() -> None:
                          os.path.join(workdir, "out.bin"))
     with open(in_path, "wb") as fh:
         fh.write(image_full[V.IMAGE_FLOOR - V.IMAGE_BASE:])
+        ordered = sorted(stubs)
+        fh.write(struct.pack("<I", len(ordered)))
+        for at in ordered:
+            fh.write(struct.pack("<I", at))
         for (regs, flags, vec, fpscr, scratch) in states:
             fh.write(V.pack_ctx(regs, flags, vec, fpscr, ctx_size))
             fh.write(scratch)
