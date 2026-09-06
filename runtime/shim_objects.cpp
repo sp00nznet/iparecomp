@@ -854,7 +854,6 @@ const Entry kEntries[] = {
      "addObserver:selector:name:object:", Nop},
     {"NSNotificationCenter", false, "removeObserver:", Nop},
     {"NSNotificationCenter", false, "postNotificationName:object:", Nop},
-    {"UIImage", true, "imageNamed:", NilMethod},
     {"UIImageView", false, "initWithImage:", SelfMethod},
     {"UIDevice", false, "uniqueIdentifier", ResourcePath},
     {"UIDevice", false, "systemVersion", ResourcePath},
@@ -888,6 +887,10 @@ const Entry kEntries[] = {
     {"NSString", false, "rangeOfCharacterFromSet:", RangeOfCharacterFromSet},
     {"NSCharacterSet", true, "newlineCharacterSet", NewlineCharacterSet},
     {"NSCharacterSet", true, "whitespaceCharacterSet", NewlineCharacterSet},
+    {"NSCharacterSet", true, "whitespaceAndNewlineCharacterSet",
+     NewlineCharacterSet},
+    {"NSCharacterSet", true, "punctuationCharacterSet",
+     NewlineCharacterSet},
 
     // CoreData is the high-score store, and there is no store. Every one of
     // these answering nil gives the game an empty score list, which it

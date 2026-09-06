@@ -110,21 +110,77 @@ void ReturnPoint(Arm32Ctx* c, float x, float y) {
   ARC_ST32(out + 4, Bits(y));
 }
 
-void ViewCenter(Arm32Ctx* c) {
-  const float w = float(WindowWidth() ? WindowWidth() : kWindowWidth);
-  const float h = float(WindowHeight() ? WindowHeight() : kWindowHeight);
-  ReturnPoint(c, w / 2, h / 2);
+// A view's frame is its own, not the screen's. Answering every `-frame` with
+// the window's rect is fine for the one full-screen GL view and wrong for
+// everything else: Canabalt's SSText is a UIView subclass, and it centres its
+// glyphs in `frame.size`. Told the frame was 320x480 when the text's own
+// bitmap is 128x32, it put the pen at x=132 and every glyph fell outside the
+// texture -- which uploaded blank, and drew as nothing.
+//
+// So the rect a view is given is kept. A view nobody framed still gets the
+// window, because the full-screen view is exactly the one that never sets one.
+struct Rect {
+  float x = 0, y = 0, w = 0, h = 0;
+};
+
+std::map<uint32_t, Rect>& Frames() {
+  static std::map<uint32_t, Rect> m;
+  return m;
 }
 
+float ArgF(Arm32Ctx* c, int i) {
+  const uint32_t bits =
+      i < 4 ? ARC_R(c, uint32_t(i)) : ARC_LD32(ARC_SP(c) + uint32_t(i - 4) * 4);
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+
+Rect FrameOf(uint32_t obj) {
+  auto it = Frames().find(obj);
+  if (it != Frames().end()) return it->second;
+  Rect r;
+  r.w = float(WindowWidth() ? WindowWidth() : kWindowWidth);
+  r.h = float(WindowHeight() ? WindowHeight() : kWindowHeight);
+  return r;
+}
+
+// A CGRect argument to a method occupies r2, r3 and then the stack, because
+// r0 and r1 are already self and _cmd.
+void TakeFrame(Arm32Ctx* c) {
+  Rect r;
+  r.x = ArgF(c, 2);
+  r.y = ArgF(c, 3);
+  r.w = ArgF(c, 4);
+  r.h = ArgF(c, 5);
+  if (ARC_R(c, 0)) Frames()[ARC_R(c, 0)] = r;
+}
+
+void ViewCenter(Arm32Ctx* c) {
+  const Rect r = FrameOf(ARC_R(c, 1));  // stret: the receiver is in r1
+  ReturnPoint(c, r.x + r.w / 2, r.y + r.h / 2);
+}
+
+// -bounds is the frame's size at the origin; -frame keeps its position.
 void ViewBounds(Arm32Ctx* c) {
-  ReturnRect(c, 0, 0, float(WindowWidth() ? WindowWidth() : kWindowWidth),
-             float(WindowHeight() ? WindowHeight() : kWindowHeight));
+  const Rect r = FrameOf(ARC_R(c, 1));
+  ReturnRect(c, 0, 0, r.w, r.h);
+}
+
+void ViewFrame(Arm32Ctx* c) {
+  const Rect r = FrameOf(ARC_R(c, 1));
+  ReturnRect(c, r.x, r.y, r.w, r.h);
+}
+
+void SetFrame(Arm32Ctx* c) {
+  TakeFrame(c);
+  ARC_W(c, 0, 0);
 }
 
 // -initWithFrame: on UIView is where FlxGLView's own [super initWithFrame:]
-// lands. Returning self is the whole contract: the subclass does the rest,
-// and all of that is lifted code.
-void InitWithFrame(Arm32Ctx* c) { /* r0 already holds self */ }
+// lands. Returning self is the whole contract -- the subclass does the rest,
+// and all of that is lifted code -- but the rect it was given is kept.
+void InitWithFrame(Arm32Ctx* c) { TakeFrame(c); /* r0 already holds self */ }
 
 void MakeKeyAndVisible(Arm32Ctx* c) {
   // The first time anything asks to be visible, there is a window to be
@@ -303,7 +359,7 @@ const Entry kEntries[] = {
 
     {"UIView", false, "initWithFrame:", InitWithFrame},
     {"UIView", false, "bounds", ViewBounds},
-    {"UIView", false, "frame", ViewBounds},
+    {"UIView", false, "frame", ViewFrame},
     {"UIView", false, "addSubview:", NilMethod},
     {"UIView", false, "layer", Layer},
     {"UIView", false, "setMultipleTouchEnabled:", NilMethod},
@@ -322,7 +378,7 @@ const Entry kEntries[] = {
     // shortcut -- nothing here composites UIViews.
     {"UIView", false, "setAlpha:", NilMethod},
     {"UIView", false, "setHidden:", NilMethod},
-    {"UIView", false, "setFrame:", NilMethod},
+    {"UIView", false, "setFrame:", SetFrame},
     {"UIView", false, "setCenter:", NilMethod},
     {"UIView", false, "setBounds:", NilMethod},
     {"UIView", false, "setOpaque:", NilMethod},
@@ -445,14 +501,15 @@ void RunFrameLoop(Arm32Ctx* c) {
     // Anything whose duration has run out fires before the frame that would
     // have seen its effect.
     RunDueAnimations(c);
+    if (const char* shot = std::getenv("ARC_SHOT"))
+      if (frames + 1 == limit) WindowCaptureNext(shot);
     ARC_W(c, 0, g_link_target);
     ARC_W(c, 1, g_link_selector);
     arc_dispatch(c, imp);
     // ARC_SHOT=<path> writes the last frame out, so "does it draw" has an
-    // answer that is not a trace.
-    if (const char* shot = std::getenv("ARC_SHOT"))
-      if (frames + 1 == limit) WindowCaptureNext(shot);
-    if (!WindowPresent()) break;
+    // answer that is not a trace. The request is made before the frame runs,
+    // because the guest presents it -- see WindowPresent.
+    if (!WindowPump()) break;
     ++frames;
   }
   std::printf("run loop: %ld frames\n", frames);

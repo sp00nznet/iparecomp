@@ -21,7 +21,17 @@ bool WindowIsOpen();
 
 // Present what has been drawn, and take whatever the user did. Returns false
 // once the window has been closed, which is how the run loop ends.
+//
+// Only the guest's own end-of-frame calls this -- `-[EAGLContext
+// presentRenderbuffer:]` is where a frame ends on a device, and it is where a
+// frame ends here. The run loop pumps instead: swapping a second time after
+// the guest has already swapped shows the back buffer, whose contents after a
+// swap are undefined, which is a convincing black screen.
 bool WindowPresent();
+
+// Take whatever the user did, without presenting. Returns false once the
+// window has been closed, which is how the run loop ends.
+bool WindowPump();
 
 int WindowWidth();
 int WindowHeight();

@@ -1,5 +1,6 @@
 #include "objc_host.h"
 
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -94,7 +95,17 @@ uint32_t HostClass(const char* name, const char* super) {
 void HostMethod(const char* cls, bool meta, const char* selector, ArcCtxFn fn) {
   const uint32_t obj = meta ? MetaByName()[cls] : ByName()[cls];
   if (!obj) return;
-  Classes()[obj].methods[selector] = fn;
+  // Two shim tables claiming the same selector is a mistake, and a silent one:
+  // whichever installs last wins, and the order is an accident of the boot
+  // sequence. `+[UIImage imageNamed:]` was registered by the image shims and
+  // then overwritten with a nil stub, so no image in the game ever loaded and
+  // every sprite drew a blank texture.
+  auto& methods = Classes()[obj].methods;
+  auto it = methods.find(selector);
+  if (it != methods.end() && it->second != fn)
+    std::printf("shim: %c[%s %s] is registered twice; the later one wins\n",
+                meta ? '+' : '-', cls, selector);
+  methods[selector] = fn;
 }
 
 uint32_t HostClassByName(const char* name, bool meta) {

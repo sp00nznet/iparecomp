@@ -616,9 +616,27 @@ void EnumerationMutation(Arm32Ctx* c) {
 void MsgSendStret(Arm32Ctx* c) {
   // A struct-returning send puts the hidden return pointer in r0, so the
   // receiver and selector shift up by one register.
+  const uint32_t out = ARC_R(c, 0);
   g_stret = true;
   Send(c, ARC_R(c, 1), 0, ARC_R(c, 2));
   g_stret = false;
+  // The value a stret send returns is otherwise invisible: it is not in a
+  // register, and the ordinary trace prints r0, which is the pointer. A rect
+  // or a point is usually the whole reason the send was interesting.
+  if (const char* env = std::getenv("ARC_TRACE_MSG")) {
+    const char* name = SelName(ARC_R(c, 2));
+    if (name && (!*env || *env == '*' || strstr(name, env)) &&
+        arc_guest_owns(out, 16)) {
+      std::printf("[str] %s ->", name);
+      for (int i = 0; i < 4; ++i) {
+        const uint32_t bits = ARC_LD32(out + uint32_t(i) * 4);
+        float f;
+        std::memcpy(&f, &bits, 4);
+        std::printf(" %g", double(f));
+      }
+      std::printf("\n");
+    }
+  }
 }
 
 }  // namespace

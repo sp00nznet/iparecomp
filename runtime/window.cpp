@@ -100,6 +100,15 @@ bool WindowPresent() {
     g_capture.clear();
   }
   SDL_GL_SwapWindow(g_window);
+  return WindowPump();
+#else
+  return false;
+#endif
+}
+
+bool WindowPump() {
+#if defined(ARC_HAVE_SDL2)
+  if (!g_open) return false;
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     switch (e.type) {
