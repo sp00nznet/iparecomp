@@ -728,8 +728,16 @@ message return two instructions earlier, and the labels come from
 key: the bundle's only `.strings` file belongs to the Settings preferences, not
 to the menu.
 
-So the count and the fill disagree, and the next trace is of the loop that
-fills the array rather than the one that reads it.
+`ARC_TRACE_STACK=<words>` prints the caller's frame alongside the message,
+which is possible because a message is sent from *inside* that frame -- so the
+arrays and counts a loop is working from are still addressable at exactly the
+moment the bad value is passed. On this bug it shows an array of four valid
+string pointers at `sp+0x120`, and the bad value appearing nowhere in the frame
+except the outgoing argument slots.
+
+Which means the value is not sitting in the frame waiting to be read: it is
+produced between the load and the call. That is the next thing to look at, and
+it is a much smaller window than "somewhere in text layout" was.
 
 ## The shim surface
 

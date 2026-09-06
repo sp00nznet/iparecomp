@@ -371,6 +371,28 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
     tracing = filter && name &&
               (!*filter || *filter == '*' || strstr(name, filter));
     if (tracing) {
+      // ARC_TRACE_STACK=<words> also dumps the caller's frame. A message is
+      // sent from inside the caller's frame, so its locals -- the arrays and
+      // counts a loop is working from -- are still addressable here, and that
+      // is often the only place a value's origin is visible at all.
+      static long depth = -1;
+      if (depth < 0) {
+        const char* d = std::getenv("ARC_TRACE_STACK");
+        depth = d ? std::strtol(d, nullptr, 0) : 0;
+      }
+      if (depth > 0) {
+        const uint32_t sp = ARC_SP(c);
+        std::printf("[stack] sp=%#x\n", sp);
+        for (long i = 0; i < depth; i += 4) {
+          std::printf("  +%03lx", i * 4);
+          for (long k = 0; k < 4 && i + k < depth; ++k) {
+            const uint32_t at = sp + uint32_t((i + k) * 4);
+            std::printf(" %08x",
+                        arc_guest_owns(at, 4) ? ARC_LD32(at) : 0xDEADDEADu);
+          }
+          std::printf("\n");
+        }
+      }
       const ObjcClass* k = g_objc.ClassAt(cls);
       const char* cn = k ? k->name.c_str() : HostClassName(cls);
       const uint32_t sp = ARC_SP(c);

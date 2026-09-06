@@ -287,7 +287,10 @@ enough to lift in full and check against an emulator.
             constant in the image. It is uninitialised memory --
             `-[MenuState init]` reads a menu-label array whose third slot was
             never written, with a loop bound that came from a message return.
-            The count and the fill disagree.
+            `ARC_TRACE_STACK` then showed the caller's whole frame at the
+            moment of the bad call: four valid string pointers at `sp+0x120`,
+            and the bad value present nowhere in the frame except the outgoing
+            arguments -- so it is produced between the load and the call.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite
