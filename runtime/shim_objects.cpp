@@ -556,6 +556,23 @@ void AddOperation(Arm32Ctx* c) {
 }
 
 void Nop(Arm32Ctx* c) { ARC_W(c, 0, 0); }
+
+// -[AVAudioPlayer initWithContentsOfURL:error:] fails, for the same reason
+// the AudioFile shims report an error rather than success with nothing in it:
+// a player that claims to have loaded a file it has not is asked to play it,
+// and the failure surfaces somewhere unrelated. Failing here sends the guest
+// down the path it already has for a device that will not give it sound.
+//
+// The out-parameter is an `NSError**` and gets nil written through it, which
+// is legal -- a caller that logs it prints "(null)" -- and messaging nil is
+// how the rest of that path stays quiet.
+//
+// ponytail: no player object at all. When something needs sound, this becomes
+// a real instance and `play`/`stop`/`setVolume:` become SDL calls.
+void AudioPlayerInitFailed(Arm32Ctx* c) {
+  if (const uint32_t err = ARC_R(c, 3)) ARC_ST32(err, 0);
+  ARC_W(c, 0, 0);
+}
 void SelfMethod(Arm32Ctx*) {}
 
 // -performSelector: and -performSelector:withObject: are an ordinary send with
@@ -772,6 +789,8 @@ const Entry kEntries[] = {
     {"NSMutableString", true, "stringWithFormat:", StringWithFormat},
 
     {"NSURL", true, "URLWithString:", URLWithString},
+    {"AVAudioPlayer", false, "initWithContentsOfURL:error:",
+     AudioPlayerInitFailed},
     {"UIDevice", true, "currentDevice", CurrentDevice},
 
     {"NSBundle", false, "localizedStringForKey:value:table:",
