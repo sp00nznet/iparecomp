@@ -16,6 +16,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "arc_mem.h"
 #include "arm32_context.h"
@@ -394,27 +395,42 @@ void EventAllTouches(Arm32Ctx* c) { ARC_W(c, 0, g_touch_set); }
 // The window is landscape and the guest's view is the portrait one a device
 // has, turned a quarter turn by the projection -- so a point comes back the
 // same way. See the quarter turn in shim_gl.
-// ARC_TAP="x,y[,frame]" taps the window at that point, in window pixels, so
-// that "does the PLAY button start the game" is a question that can be asked
-// without a person clicking. Down at `frame` (200 by default), up four frames
-// later, because a button wants both halves.
-Touch ScriptedTouch(long frame) {
-  static long at = -1;
-  static float x = 0, y = 0;
+// ARC_TAP="x,y[,frame][;x,y,frame...]" taps the window at those points, in
+// window pixels, so that "does the PLAY button start the game" is a question
+// that can be asked without a person clicking -- and so that a run through the
+// menus is a thing that repeats exactly. Down at `frame` (200 by default), up
+// four frames later, because a button wants both halves.
+struct Tap {
+  float x = 0, y = 0;
+  long at = 0;
+};
+
+const std::vector<Tap>& Taps() {
+  static std::vector<Tap> v;
   static bool parsed = false;
   if (!parsed) {
     parsed = true;
-    if (const char* env = std::getenv("ARC_TAP")) {
+    const char* env = std::getenv("ARC_TAP");
+    while (env && *env) {
+      Tap t;
       char* end = nullptr;
-      x = std::strtof(env, &end);
-      if (end && *end == ',') y = std::strtof(end + 1, &end);
-      at = (end && *end == ',') ? std::strtol(end + 1, nullptr, 10) : 200;
+      t.x = std::strtof(env, &end);
+      if (!end || *end != ',') break;
+      t.y = std::strtof(end + 1, &end);
+      t.at = (end && *end == ',') ? std::strtol(end + 1, &end, 10) : 200;
+      v.push_back(t);
+      env = (end && *end == ';') ? end + 1 : nullptr;
     }
   }
+  return v;
+}
+
+Touch ScriptedTouch(long frame) {
   Touch t;
-  if (at < 0) return t;
-  if (frame == at) t = {Touch::kBegan, x, y, true};
-  else if (frame == at + 4) t = {Touch::kEnded, x, y, true};
+  for (const auto& tap : Taps()) {
+    if (frame == tap.at) t = {Touch::kBegan, tap.x, tap.y, true};
+    else if (frame == tap.at + 4) t = {Touch::kEnded, tap.x, tap.y, true};
+  }
   return t;
 }
 
@@ -630,14 +646,33 @@ void RunFrameLoop(Arm32Ctx* c) {
     RunDueAnimations(c);
     RunDuePerforms(c);
     DeliverTouch(c, frames);
-    if (const char* shot = std::getenv("ARC_SHOT"))
-      if (frames + 1 == limit) WindowCaptureNext(shot);
-    ARC_W(c, 0, g_link_target);
-    ARC_W(c, 1, g_link_selector);
-    arc_dispatch(c, imp);
     // ARC_SHOT=<path> writes the last frame out, so "does it draw" has an
     // answer that is not a trace. The request is made before the frame runs,
     // because the guest presents it -- see WindowPresent.
+    //
+    // With ARC_SHOT_EVERY=n it writes every nth frame instead, numbered, and
+    // the run becomes a recording: no window chrome, no cursor, and the same
+    // frames every time, which a hand-held screen capture is not.
+    if (const char* shot = std::getenv("ARC_SHOT")) {
+      static long every = -1;
+      if (every < 0) {
+        const char* e = std::getenv("ARC_SHOT_EVERY");
+        every = e ? std::strtol(e, nullptr, 10) : 0;
+      }
+      if (every > 0) {
+        if (frames % every == 0) {
+          char path[512];
+          std::snprintf(path, sizeof path, "%s.%04ld.ppm", shot,
+                        frames / every);
+          WindowCaptureNext(path);
+        }
+      } else if (frames + 1 == limit) {
+        WindowCaptureNext(shot);
+      }
+    }
+    ARC_W(c, 0, g_link_target);
+    ARC_W(c, 1, g_link_selector);
+    arc_dispatch(c, imp);
     if (!WindowPump()) break;
     ++frames;
   }
