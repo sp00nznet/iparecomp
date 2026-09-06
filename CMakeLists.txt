@@ -27,6 +27,7 @@ add_library(iparecomp STATIC
   runtime/shim_audio.cpp
   runtime/shim_coregraphics.cpp
   runtime/shim_image.cpp
+  runtime/shim_font.cpp
   runtime/window.cpp
   runtime/arc_boot.cpp
 )
@@ -39,6 +40,29 @@ endif()
 # Decoding a PNG is the last place to be inventive, and libpng is already
 # here. Without it the bundle's 73 images cannot be read and the game runs
 # with nothing on screen.
+# Text layout is a loop over font metrics, so they have to be real. FreeType
+# is the reference implementation and it was already installed.
+find_package(Freetype QUIET)
+if(NOT FREETYPE_FOUND)
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(FT_PC QUIET freetype2)
+  endif()
+endif()
+if(FREETYPE_FOUND)
+  target_link_libraries(iparecomp PUBLIC Freetype::Freetype)
+  target_compile_definitions(iparecomp PUBLIC ARC_HAVE_FREETYPE)
+  message(STATUS "iparecomp: FreeType found -- real font metrics")
+elseif(FT_PC_FOUND)
+  target_include_directories(iparecomp PUBLIC ${FT_PC_INCLUDE_DIRS})
+  target_link_libraries(iparecomp PUBLIC ${FT_PC_LIBRARIES})
+  target_link_directories(iparecomp PUBLIC ${FT_PC_LIBRARY_DIRS})
+  target_compile_definitions(iparecomp PUBLIC ARC_HAVE_FREETYPE)
+  message(STATUS "iparecomp: FreeType ${FT_PC_VERSION} via pkg-config")
+else()
+  message(STATUS "iparecomp: no FreeType -- text will not lay out")
+endif()
+
 find_package(PNG QUIET)
 if(NOT PNG_FOUND)
   # CMake's own finder only looks in the system prefixes, which on an MSYS2 or

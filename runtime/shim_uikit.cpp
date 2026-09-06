@@ -75,6 +75,22 @@ void ScreenBounds(Arm32Ctx* c) {
   ReturnRect(c, 0, 0, float(kScreenWidth), float(kScreenHeight));
 }
 
+// A CGPoint is two floats and still comes through objc_msgSend_stret -- the
+// trail says so, which is the only reliable way to tell. Under stret the
+// hidden pointer takes r0 and the receiver moves to r1.
+void ReturnPoint(Arm32Ctx* c, float x, float y) {
+  const uint32_t out = ARC_R(c, 0);
+  if (!out) return;
+  ARC_ST32(out + 0, Bits(x));
+  ARC_ST32(out + 4, Bits(y));
+}
+
+void ViewCenter(Arm32Ctx* c) {
+  const float w = float(WindowWidth() ? WindowWidth() : kWindowWidth);
+  const float h = float(WindowHeight() ? WindowHeight() : kWindowHeight);
+  ReturnPoint(c, w / 2, h / 2);
+}
+
 void ViewBounds(Arm32Ctx* c) {
   ReturnRect(c, 0, 0, float(WindowWidth() ? WindowWidth() : kWindowWidth),
              float(WindowHeight() ? WindowHeight() : kWindowHeight));
@@ -244,6 +260,7 @@ const Entry kEntries[] = {
     {"UIView", false, "setTransform:", NilMethod},
     {"UIView", false, "setAutoresizingMask:", NilMethod},
     {"UIView", false, "setTag:", NilMethod},
+    {"UIView", false, "center", ViewCenter},
     {"UIView", false, "setNeedsDisplay", NilMethod},
     {"UIView", false, "setNeedsLayout", NilMethod},
     {"UIView", false, "layoutSubviews", NilMethod},

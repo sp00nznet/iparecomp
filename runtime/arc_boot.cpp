@@ -1,5 +1,9 @@
 #include "arc_boot.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include <csetjmp>
 #include <cstdio>
 #include <cstring>
@@ -25,6 +29,7 @@ size_t InstallAudioShims(const MachOImage& img);
 size_t InstallFoundationCImports(const MachOImage& img);
 size_t InstallCoreGraphicsShims(const MachOImage& img);
 size_t InstallImageShims(const MachOImage& img);
+size_t InstallFontShims(const MachOImage& img);
 void SetBundlePath(const std::string& p);
 
 namespace {
@@ -63,6 +68,69 @@ const char* NameOf(const MachOImage& img, uint32_t addr) {
 
 }  // namespace
 
+namespace {
+
+const MachOImage* g_fault_image = nullptr;
+
+// What the OS says is at an address. The difference between a wild pointer and
+// a real region touched the wrong way is most of the diagnosis, and only the
+// OS knows which it is.
+void DescribeAddress(uintptr_t at) {
+#if defined(_WIN32)
+  MEMORY_BASIC_INFORMATION mbi;
+  if (!VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi)) {
+    std::printf("  the address is not in this process's address space\n");
+    return;
+  }
+  const char* state = mbi.State == MEM_COMMIT    ? "committed"
+                      : mbi.State == MEM_RESERVE ? "reserved, not committed"
+                                                 : "free";
+  std::printf("  %p is %s", reinterpret_cast<void*>(at), state);
+  if (mbi.State == MEM_COMMIT)
+    std::printf(", protection %#lx", static_cast<unsigned long>(mbi.Protect));
+  std::printf("\n");
+#else
+  std::printf("  %p\n", reinterpret_cast<void*>(at));
+#endif
+}
+
+#if defined(_WIN32)
+// A *vectored* handler, not an unhandled-exception filter. The C runtime
+// installs its own SEH chain, so the filter never ran; a vectored handler is
+// called before any of that, which is the only place a report is guaranteed to
+// happen. It reports and then lets normal handling continue, so the process
+// still dies the way it would have.
+LONG WINAPI OnFault(EXCEPTION_POINTERS* info) {
+  const DWORD code = info->ExceptionRecord->ExceptionCode;
+  if (code != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+  const ULONG_PTR kind = info->ExceptionRecord->ExceptionInformation[0];
+  const uintptr_t at = uintptr_t(info->ExceptionRecord->ExceptionInformation[1]);
+  std::printf("\nthe guest faulted: %s %p\n",
+              kind == 0   ? "reading"
+              : kind == 1 ? "writing"
+                          : "executing",
+              reinterpret_cast<void*>(at));
+  DescribeAddress(at);
+  // Executing an address that is mapped is the giveaway for calling guest
+  // code natively -- it is machine code for another architecture.
+  if (kind == 8)
+    std::printf("  executing mapped memory means a guest address was called "
+                "as if it were a host function\n");
+  if (g_fault_image) ReportTrail(*g_fault_image);
+  std::fflush(stdout);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+}  // namespace
+
+void InstallFaultHandler(const MachOImage& img) {
+  g_fault_image = &img;
+#if defined(_WIN32)
+  AddVectoredExceptionHandler(1, OnFault);
+#endif
+}
+
 BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
                 bool permissive) {
   BootResult r;
@@ -92,6 +160,8 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
     }
   }
 
+  InstallFaultHandler(img);
+
   r.shims = InstallLibSystemShims(img);
   r.shims += InstallUIKitShims(img);
   r.shims += InstallGlShims(img);
@@ -99,6 +169,8 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   r.shims += InstallFoundationCImports(img);
   r.shims += InstallCoreGraphicsShims(img);
   r.shims += InstallImageShims(img);
+  // After CoreGraphics, so the real font metrics win over the stubs.
+  r.shims += InstallFontShims(img);
   if (Objc().Init(img)) InstallObjcRuntime(img);
   // Host classes first, then the bind sites that point at them. Without this
   // every __objc_classrefs slot reads zero, and a message to nil is answered

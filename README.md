@@ -263,17 +263,22 @@ enough to lift in full and check against an emulator.
       - [x] `--bundle` so resources resolve, and a function budget so a guest
             that never reaches the frame loop reports where it was going round
             instead of hanging.
-      - [ ] CoreGraphics *fonts*, which is where it stops now. The metrics are
-            currently a stub, and stub metrics do not merely draw nothing --
-            they hang: `-[SSText(Private) nextWrapOffsetForGlyphs:]` word-wraps
-            by asking how many glyphs fit, and an invented advance either fits
-            nothing or divides by nothing. FreeType is the answer and Nokia.ttf
-            is in the bundle.
+      - [x] Fonts backed by FreeType, out of the bundle's own Nokia.ttf --
+            real advances and bounding boxes in font units, and glyphs
+            rasterised into the same bitmap context the game uploads.
+      - [x] NSArray and NSMutableArray for real, including fast enumeration,
+            because `for (x in array)` is everywhere and an array that stays
+            silently empty is a menu with no buttons in it.
+      - [ ] Text layout still faults. The run now gets through the menu's
+            buttons and into `-[SSText setText:]`, where it reads a wild
+            pointer -- reported, with the address and what the OS says is at
+            it, by the fault handler rather than as a bare crash.
 
       Canabalt now runs from `_start` through the whole launch, the audio
-      load loop, the GL view and framebuffer setup, texture loading and sprite
-      construction, and into text layout -- **113 imports answered, 34 to go**.
-      It prints its own diagnostics along the way, because `NSLog` works:
+      load loop, the GL view and framebuffer setup, texture loading, sprite
+      construction, the high-score store and the menu's buttons, and into text
+      layout -- **113 imports answered, 34 to go**. It prints its own
+      diagnostics along the way, because `NSLog` works:
 
       ```
       [guest] check for other audio!

@@ -44,6 +44,17 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
 // resolved from here.
 void SetBundlePath(const std::string& path);
 
+// Catch a hardware fault and describe it before the process dies.
+//
+// A trap is the lift saying it cannot express something, and that path prints
+// a trail. A *fault* is the guest touching memory that is not there, and by
+// default it prints nothing at all -- the least useful outcome, since the host
+// call stack is thousands of identically shaped C functions and the faulting
+// address names the data rather than the code. This installs a handler that
+// reports the address, what the OS says is at it, and the same trail a trap
+// would have given.
+void InstallFaultHandler(const MachOImage& img);
+
 // What the guest was doing, most recent first. Safe to call after a trap.
 void ReportTrail(const MachOImage& img);
 

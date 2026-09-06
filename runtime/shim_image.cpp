@@ -277,6 +277,19 @@ const ObjcShim kObjc[] = {
 
 }  // namespace
 
+// The bitmap context, for whoever else draws into it -- the font shims
+// rasterise glyphs straight into the same buffer the game is about to upload.
+bool BitmapContextInfo(uint32_t handle, uint32_t* data, int* width, int* height,
+                       int* stride) {
+  auto it = Contexts().find(handle);
+  if (it == Contexts().end()) return false;
+  if (data) *data = it->second.data;
+  if (width) *width = it->second.width;
+  if (height) *height = it->second.height;
+  if (stride) *stride = it->second.bytes_per_row;
+  return true;
+}
+
 size_t InstallImageShims(const MachOImage& img) {
   for (const auto& e : kObjc) {
     HostClass(e.cls, "NSObject");

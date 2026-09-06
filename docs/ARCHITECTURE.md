@@ -570,6 +570,52 @@ The fix is the size, but the lesson is the silence: a capacity limit that is
 reached without saying so converts an ordinary mistake into an unrelated
 mystery. It is loud now.
 
+### Where an aggregate is returned is the ABI's decision
+
+`-rangeOfCharacterFromSet:options:range:` returns an `NSRange`: two words,
+small enough to look like it comes back in a register pair. It does not. The
+Objective-C ABI sends it through `objc_msgSend_stret`, and under stret the
+hidden return pointer takes r0 and everything shifts up -- receiver r1,
+selector r2, first argument r3.
+
+Reading it as an ordinary send takes the *string* for a return buffer and the
+selector for the string, which had the word-wrap loop searching a nonexistent
+string forever. A `CGPoint` from `-center` does the same thing, and it is two
+floats.
+
+There is no size rule to reason from here. The reliable way to tell is the call
+trail, which now records whether a message arrived through `objc_msgSend` or
+`objc_msgSend_stret`:
+
+```
+  -[SSText center]
+  objc_msgSend_stret
+```
+
+### A fault has to describe itself
+
+A trap is the lift saying it cannot express something, and it prints a trail. A
+*fault* is the guest touching memory that is not there, and by default it
+prints nothing -- the host stack is thousands of identically shaped C
+functions and the faulting address names the data rather than the code.
+
+So a handler reports the address, asks the OS what is at it, and prints the
+same trail:
+
+```
+the guest faulted: reading 0000000080200593
+  0000000080200593 is free
+
+guest functions entered, most recent first:
+  0x00021300  -[SSText setText:]
+  0x00021fac  -[SSText(Private) computeNewBounds]
+```
+
+"Free" is the whole diagnosis: a committed region touched the wrong way is a
+different bug from an address that was never anything. And it has to be a
+*vectored* handler rather than an unhandled-exception filter, because the C
+runtime installs its own SEH chain and the filter never runs.
+
 ## The shim surface
 
 Measured, not estimated. Canabalt's 205 undefined symbols, grouped by the

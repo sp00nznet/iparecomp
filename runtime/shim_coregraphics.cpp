@@ -140,45 +140,10 @@ void AffineTranslate(Arm32Ctx* c) {
   for (int i = 0; i < 6; ++i) ARC_ST32(out + uint32_t(i) * 4, Bits(values[i]));
 }
 
-// --- fonts, which are not rasterised yet -----------------------------------
-// A CGFont here is a token with believable metrics, so the text layout the
-// game does around it produces sane numbers and nothing divides by zero. What
-// it does not do is draw a glyph: showing text needs a TTF rasteriser, and
-// until there is one the HUD is simply absent rather than wrong. The metrics
-// are Nokia.ttf's own, so the boxes text is laid out into are the right size.
-constexpr uint32_t kFontToken = 0xF0417000;
-constexpr int kUnitsPerEm = 2048;
-
-void FontCreate(Arm32Ctx* c) { ARC_W(c, 0, kFontToken); }
-void FontRetain(Arm32Ctx* c) { ARC_W(c, 0, ARC_R(c, 0)); }
-void FontRelease(Arm32Ctx* c) { ARC_W(c, 0, 0); }
-void UnitsPerEm(Arm32Ctx* c) { ARC_W(c, 0, kUnitsPerEm); }
-void CapHeight(Arm32Ctx* c) { ARC_W(c, 0, kUnitsPerEm * 7 / 10); }
-
-// Advances and bounding boxes are asked for per glyph and written into arrays
-// the caller owns.
-//
-// Zero, and that is a decision rather than a placeholder. A half-em advance
-// looked more honest and hung the game: SSText word-wraps by asking how many
-// glyphs fit in the line, and with an advance it could not fit even one, the
-// wrap offset never moved. A zero advance means everything fits, the loop ends
-// on its first pass, and the text is invisible -- which it is anyway until
-// there is a rasteriser. Between a wrong width and a run that never returns,
-// take the width.
-void GlyphAdvances(Arm32Ctx* c) {
-  const uint32_t count = A(c, 2), out = A(c, 3);
-  for (uint32_t i = 0; i < count && i < 4096 && out; ++i)
-    ARC_ST32(out + i * 4, 0);
-  ARC_W(c, 0, 1);
-}
-
-void GlyphBBoxes(Arm32Ctx* c) {
-  const uint32_t count = A(c, 2), out = A(c, 3);
-  for (uint32_t i = 0; i < count && i < 4096 && out; ++i)
-    for (int k = 0; k < 4; ++k) ARC_ST32(out + (i * 4 + uint32_t(k)) * 4, 0);
-  ARC_W(c, 0, 1);
-}
-
+// Font metrics used to be stubbed here, and stub metrics hung the game --
+// text layout is a loop over them, so an invented advance does not draw the
+// wrong thing, it fails to terminate. They live in shim_font.cpp now and come
+// out of the bundle's own Nokia.ttf through FreeType.
 void Nothing(Arm32Ctx* c) { ARC_W(c, 0, 0); }
 
 struct Shim {
@@ -193,19 +158,7 @@ const Shim kShims[] = {
     {"_CGAffineTransformIsIdentity", AffineIsIdentity},
     {"_CGAffineTransformTranslate", AffineTranslate},
 
-    {"_CGDataProviderCreateWithFilename", FontCreate},
-    {"_CGDataProviderRelease", FontRelease},
-    {"_CGFontCreateWithDataProvider", FontCreate},
-    {"_CGFontRetain", FontRetain},
-    {"_CGFontRelease", FontRelease},
-    {"_CGFontGetUnitsPerEm", UnitsPerEm},
-    {"_CGFontGetCapHeight", CapHeight},
-    {"_CGFontGetGlyphAdvances", GlyphAdvances},
-    {"_CGFontGetGlyphBBoxes", GlyphBBoxes},
 
-    {"_CGContextSetFont", Nothing},
-    {"_CGContextSetFontSize", Nothing},
-    {"_CGContextShowGlyphsAtPoint", Nothing},
     {"_CGContextSetTextMatrix", Nothing},
     {"_CGContextSetTextDrawingMode", Nothing},
     {"_CGContextSetFillColorWithColor", Nothing},

@@ -304,6 +304,130 @@ void SetObjectForKey(Arm32Ctx* c) {
   ARC_W(c, 0, 0);
 }
 
+// --- arrays ----------------------------------------------------------------
+// Real ones, because the game keeps score lists and sprite groups in them and
+// reads them back. An array that silently stays empty is a menu with no
+// buttons in it, which looks like a rendering problem rather than a missing
+// collection.
+std::map<uint32_t, std::vector<uint32_t>>& Arrays() {
+  static std::map<uint32_t, std::vector<uint32_t>> m;
+  return m;
+}
+
+uint32_t MakeArray(const char* cls) {
+  const uint32_t obj = HostAllocInstance(HostClass(cls, "NSObject"));
+  if (obj) Arrays()[obj];
+  return obj;
+}
+
+void ArrayNew(Arm32Ctx* c) { ARC_W(c, 0, MakeArray("NSMutableArray")); }
+
+void ArrayWithObject(Arm32Ctx* c) {
+  const uint32_t a = MakeArray("NSMutableArray");
+  if (a && ARC_R(c, 2)) Arrays()[a].push_back(ARC_R(c, 2));
+  ARC_W(c, 0, a);
+}
+
+// +arrayWithObjects: is nil-terminated and variadic: r2 and r3, then stack.
+void ArrayWithObjects(Arm32Ctx* c) {
+  const uint32_t a = MakeArray("NSMutableArray");
+  if (!a) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  for (uint32_t v : VarArgs(c, 2)) {
+    if (!v) break;
+    Arrays()[a].push_back(v);
+  }
+  ARC_W(c, 0, a);
+}
+
+void ArrayCount(Arm32Ctx* c) {
+  auto it = Arrays().find(ARC_R(c, 0));
+  ARC_W(c, 0, it == Arrays().end() ? 0 : uint32_t(it->second.size()));
+}
+
+void ArrayObjectAtIndex(Arm32Ctx* c) {
+  auto it = Arrays().find(ARC_R(c, 0));
+  const uint32_t i = ARC_R(c, 2);
+  ARC_W(c, 0, it != Arrays().end() && i < it->second.size() ? it->second[i] : 0);
+}
+
+void ArrayLastObject(Arm32Ctx* c) {
+  auto it = Arrays().find(ARC_R(c, 0));
+  ARC_W(c, 0, it == Arrays().end() || it->second.empty() ? 0
+                                                         : it->second.back());
+}
+
+void ArrayAddObject(Arm32Ctx* c) {
+  if (ARC_R(c, 2)) Arrays()[ARC_R(c, 0)].push_back(ARC_R(c, 2));
+  ARC_W(c, 0, 0);
+}
+
+void ArrayRemoveObject(Arm32Ctx* c) {
+  auto& v = Arrays()[ARC_R(c, 0)];
+  const uint32_t want = ARC_R(c, 2);
+  for (size_t i = 0; i < v.size(); ++i)
+    if (v[i] == want) {
+      v.erase(v.begin() + long(i));
+      break;
+    }
+  ARC_W(c, 0, 0);
+}
+
+void ArrayRemoveAll(Arm32Ctx* c) {
+  Arrays()[ARC_R(c, 0)].clear();
+  ARC_W(c, 0, 0);
+}
+
+// -countByEnumeratingWithState:objects:count: is what `for (x in array)`
+// compiles to. The state block is:
+//
+//   unsigned long state; id* itemsPtr; unsigned long* mutationsPtr;
+//   unsigned long extra[5];
+//
+// The caller reads the items through `itemsPtr`, so they have to be somewhere
+// the guest can point at -- the elements live in a host vector here, so a
+// guest buffer is materialised for the enumeration to walk.
+//
+// `mutationsPtr` is dereferenced before and after each batch and compared: if
+// the value changes, the runtime raises. It gets a word that never does.
+void CountByEnumerating(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0);
+  const uint32_t state = ARC_R(c, 2);
+  auto it = Arrays().find(self);
+  if (it == Arrays().end() || !state) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  // Everything is returned in one batch, so a second call ends the loop.
+  if (ARC_LD32(state + 0)) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  const uint32_t n = uint32_t(it->second.size());
+  const uint32_t buf = arc_guest_alloc(n * 4 + 4, 4);
+  if (!buf) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  for (uint32_t i = 0; i < n; ++i) ARC_ST32(buf + i * 4, it->second[i]);
+  ARC_ST32(buf + n * 4, 0);   // the mutation counter, which never moves
+  ARC_ST32(state + 0, 1);     // state: this batch has been handed out
+  ARC_ST32(state + 4, buf);   // itemsPtr
+  ARC_ST32(state + 8, buf + n * 4);  // mutationsPtr
+  ARC_W(c, 0, n);
+}
+
+void ArrayContains(Arm32Ctx* c) {
+  auto it = Arrays().find(ARC_R(c, 0));
+  const uint32_t want = ARC_R(c, 2);
+  bool found = false;
+  if (it != Arrays().end())
+    for (uint32_t v : it->second) found = found || v == want;
+  ARC_W(c, 0, found ? 1 : 0);
+}
+
 // --- singletons ------------------------------------------------------------
 uint32_t Singleton(const char* name) {
   static std::map<std::string, uint32_t> made;
@@ -318,6 +442,14 @@ void StandardUserDefaults(Arm32Ctx* c) {
   ARC_W(c, 0, Singleton("NSUserDefaults"));
 }
 void MainBundle(Arm32Ctx* c) { ARC_W(c, 0, Singleton("NSBundle")); }
+
+// Its own object. Handing back the user-defaults singleton instead was a
+// shortcut that cost more than it saved: identity is what these are for, and
+// two singletons sharing one address means a message meant for either can
+// arrive at the other.
+void DefaultCenter(Arm32Ctx* c) {
+  ARC_W(c, 0, Singleton("NSNotificationCenter"));
+}
 void Synchronize(Arm32Ctx* c) { ARC_W(c, 0, 1); }
 
 // A default that was never written reads as zero, which for -integerForKey:
@@ -381,6 +513,33 @@ void AddOperation(Arm32Ctx* c) {
 void Nop(Arm32Ctx* c) { ARC_W(c, 0, 0); }
 void SelfMethod(Arm32Ctx*) {}
 
+// -performSelector: and -performSelector:withObject: are an ordinary send with
+// the selector arriving as a value rather than in the instruction stream, so
+// this rearranges the registers into what a method expects and dispatches.
+void PerformSelector(Arm32Ctx* c) {
+  const uint32_t self = ARC_R(c, 0);
+  const uint32_t sel = ARC_R(c, 2);
+  const uint32_t arg = ARC_R(c, 3);
+  if (!self || !sel) {
+    ARC_W(c, 0, 0);
+    return;
+  }
+  const uint32_t cls = ARC_LD32(self);
+  const char* name = reinterpret_cast<const char*>(uintptr_t(sel));
+  ARC_W(c, 0, self);
+  ARC_W(c, 1, sel);
+  ARC_W(c, 2, arg);
+  if (const uint32_t imp = Objc().Lookup(cls, name)) {
+    arc_dispatch(c, imp);
+    return;
+  }
+  if (const ArcCtxFn fn = LookupHostMethod(cls, name)) {
+    fn(c);
+    return;
+  }
+  ARC_W(c, 0, 0);
+}
+
 // --- what text layout asks a string for ------------------------------------
 
 // -getCharacters: copies UTF-16 code units into a buffer the caller sized from
@@ -407,20 +566,38 @@ void CharacterAtIndex(Arm32Ctx* c) {
 // forever does not terminate. This is what the permissive budget caught.
 constexpr uint32_t kNotFound = 0x7FFFFFFF;
 
-// -rangeOfCharacterFromSet:options:range: returns an NSRange -- two words,
-// small enough to come back in r0 and r1 rather than through a hidden pointer.
+// -rangeOfCharacterFromSet:options:range: returns an NSRange, and this arrives
+// through objc_msgSend_stret rather than the ordinary one.
+//
+// That is not a detail. Under stret the hidden return pointer takes r0 and
+// everything shifts up: the receiver is r1, the selector r2, and the first
+// argument r3. Reading it as an ordinary send takes the *string* for a return
+// buffer and the selector for the string -- which is what had the word-wrap
+// loop searching a nonexistent string forever and never advancing.
+//
+// An NSRange is only eight bytes, so it looks small enough to come back in a
+// register pair; the Objective-C ABI sends it through stret anyway. Where an
+// aggregate goes is the ABI's decision, not a size calculation.
 void RangeOfCharacterFromSet(Arm32Ctx* c) {
-  const std::string text = StringText(ARC_R(c, 0));
-  // The only set anything here asks for is the newline set, so this looks for
-  // one rather than modelling NSCharacterSet.
-  const size_t at = text.find_first_of("\n\r");
-  if (at == std::string::npos) {
-    ARC_W(c, 0, kNotFound);
-    ARC_W(c, 1, 0);
-    return;
+  const uint32_t out = ARC_R(c, 0);
+  const std::string text = StringText(ARC_R(c, 1));
+  // set is r3; options and the range to search in follow on the stack.
+  const uint32_t sp = ARC_SP(c);
+  uint32_t from = 0, len = uint32_t(text.size());
+  if (arc_guest_owns(sp + 4, 8)) {
+    from = ARC_LD32(sp + 4);
+    len = ARC_LD32(sp + 8);
   }
-  ARC_W(c, 0, uint32_t(at));
-  ARC_W(c, 1, 1);
+  if (from > text.size()) from = uint32_t(text.size());
+  if (from + len > text.size()) len = uint32_t(text.size()) - from;
+
+  // The only set anything here asks for is the newline set, so this looks for
+  // a newline rather than modelling NSCharacterSet.
+  const size_t at = text.find_first_of("\n\r", from);
+  const bool found = at != std::string::npos && at < size_t(from) + len;
+  if (!out) return;
+  ARC_ST32(out + 0, found ? uint32_t(at) : kNotFound);
+  ARC_ST32(out + 4, found ? 1u : 0u);
 }
 
 void NewlineCharacterSet(Arm32Ctx* c) {
@@ -558,6 +735,17 @@ const Entry kEntries[] = {
     {"NSUserDefaults", false, "registerDefaults:", Nop},
     {"UIColor", false, "CGColor", NilMethod},
 
+    // Reading a notification's payload off something that is not one. Nothing
+    // posts notifications here, so the game is asking about an event that did
+    // not happen and nil is the honest answer -- but the receiver being a
+    // MenuState rather than an NSNotification says the two sides disagree
+    // about something, and this is where to look if that matters later.
+    {"NSObject", false, "performSelector:", PerformSelector},
+    {"NSObject", false, "performSelector:withObject:", PerformSelector},
+    {"NSObject", false, "userInfo", Nop},
+    {"NSObject", false, "object", Nop},
+    {"NSObject", false, "name", Nop},
+
     {"NSObject", false, "copy", SelfMethod},
     {"NSObject", false, "mutableCopy", SelfMethod},
     {"NSBundle", false, "resourcePath", ResourcePath},
@@ -565,8 +753,7 @@ const Entry kEntries[] = {
     {"NSBundle", false, "pathForResource:ofType:", NilMethod},
     {"NSValue", true, "valueWithPointer:", ValueWithPointer},
     {"NSValue", false, "pointerValue", PointerValue},
-    {"NSNotificationCenter", true, "defaultCenter",
-     StandardUserDefaults},
+    {"NSNotificationCenter", true, "defaultCenter", DefaultCenter},
     {"NSNotificationCenter", false,
      "addObserver:selector:name:object:", Nop},
     {"NSNotificationCenter", false, "removeObserver:", Nop},
@@ -579,10 +766,24 @@ const Entry kEntries[] = {
     {"NSString", false, "stringByAppendingString:", SelfMethod},
     {"NSMutableString", false, "appendString:", Nop},
     {"NSMutableString", false, "appendFormat:", Nop},
-    {"NSArray", true, "array", Nop},
-    {"NSMutableArray", true, "array", Nop},
-    {"NSMutableArray", false, "addObject:", Nop},
-    {"NSMutableArray", false, "count", Nop},
+    {"NSArray", true, "array", ArrayNew},
+    {"NSArray", true, "arrayWithObject:", ArrayWithObject},
+    {"NSArray", true, "arrayWithObjects:", ArrayWithObjects},
+    {"NSArray", true, "arrayWithArray:", ArrayWithObject},
+    {"NSArray", false, "count", ArrayCount},
+    {"NSArray", false, "objectAtIndex:", ArrayObjectAtIndex},
+    {"NSArray", false, "lastObject", ArrayLastObject},
+    {"NSArray", false, "containsObject:", ArrayContains},
+    {"NSArray", false, "countByEnumeratingWithState:objects:count:",
+     CountByEnumerating},
+    {"NSMutableArray", false, "countByEnumeratingWithState:objects:count:",
+     CountByEnumerating},
+    {"NSMutableArray", true, "array", ArrayNew},
+    {"NSMutableArray", true, "arrayWithCapacity:", ArrayNew},
+    {"NSMutableArray", false, "addObject:", ArrayAddObject},
+    {"NSMutableArray", false, "addObjectsFromArray:", ArrayAddObject},
+    {"NSMutableArray", false, "removeObject:", ArrayRemoveObject},
+    {"NSMutableArray", false, "removeAllObjects", ArrayRemoveAll},
 
     {"NSString", false, "getCharacters:", GetCharacters},
     {"NSString", false, "characterAtIndex:", CharacterAtIndex},
@@ -591,6 +792,26 @@ const Entry kEntries[] = {
     {"NSString", false, "rangeOfCharacterFromSet:", RangeOfCharacterFromSet},
     {"NSCharacterSet", true, "newlineCharacterSet", NewlineCharacterSet},
     {"NSCharacterSet", true, "whitespaceCharacterSet", NewlineCharacterSet},
+
+    // CoreData is the high-score store, and there is no store. Every one of
+    // these answering nil gives the game an empty score list, which it
+    // handles -- it is the state a first launch is in.
+    {"NSEntityDescription", true, "entityForName:inManagedObjectContext:", Nop},
+    {"NSEntityDescription", true, "insertNewObjectForEntityForName:"
+                                  "inManagedObjectContext:", Nop},
+    {"NSFetchRequest", false, "setEntity:", Nop},
+    {"NSFetchRequest", false, "setSortDescriptors:", Nop},
+    {"NSFetchRequest", false, "setFetchLimit:", Nop},
+    {"NSManagedObjectContext", false, "executeFetchRequest:error:", Nop},
+    {"NSManagedObjectContext", false, "save:", Nop},
+    {"NSManagedObjectContext", false, "deleteObject:", Nop},
+    {"NSManagedObjectContext", false,
+     "setPersistentStoreCoordinator:", Nop},
+    {"NSManagedObjectModel", true, "mergedModelFromBundles:", Nop},
+    {"NSPersistentStoreCoordinator", false, "initWithManagedObjectModel:", Nop},
+    {"NSPersistentStoreCoordinator", false,
+     "addPersistentStoreWithType:configuration:URL:options:error:", Nop},
+    {"NSSortDescriptor", false, "initWithKey:ascending:", Nop},
 };
 
 struct CImport {
