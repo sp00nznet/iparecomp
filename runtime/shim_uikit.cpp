@@ -138,17 +138,21 @@ void Layer(Arm32Ctx* c) {
 // These have to be UIColor instances, not instances of a class invented to
 // hold them. Anything sent to a colour afterwards -- `CGColor` here -- is
 // looked up on the receiver's own class, so a stand-in class answers nothing.
-uint32_t NamedColor(const char* which) {
-  static std::map<std::string, uint32_t> made;
-  auto it = made.find(which);
-  if (it != made.end()) return it->second;
-  const uint32_t obj = HostAllocInstance(HostClass("UIColor", "NSObject"));
-  made[which] = obj;
-  return obj;
+//
+// Every `+xxxColor` is the same shape -- a token that has to be a distinct,
+// stable UIColor instance and carries no components anything here reads -- so
+// one handler covers the whole set. The selector pointer in r1 is already a
+// unique key for the name, which saves both a thunk per colour and a way to
+// turn a selector back into a string.
+//
+// ponytail: no components. When something asks a colour what it is made of,
+// give this map an RGBA and answer `getRed:green:blue:alpha:` from it.
+void SomeColor(Arm32Ctx* c) {
+  static std::map<uint32_t, uint32_t> made;
+  uint32_t& obj = made[ARC_R(c, 1)];
+  if (!obj) obj = HostAllocInstance(HostClass("UIColor", "NSObject"));
+  ARC_W(c, 0, obj);
 }
-
-void WhiteColor(Arm32Ctx* c) { ARC_W(c, 0, NamedColor("white")); }
-void BlackColor(Arm32Ctx* c) { ARC_W(c, 0, NamedColor("black")); }
 
 // --- EAGL ------------------------------------------------------------------
 // The context is real on a device and irrelevant here: SDL already made one
@@ -286,8 +290,23 @@ const Entry kEntries[] = {
     {"UIImageView", false, "setImage:", NilMethod},
     {"UIImageView", false, "initWithFrame:", InitWithFrame},
 
-    {"UIColor", true, "whiteColor", WhiteColor},
-    {"UIColor", true, "blackColor", BlackColor},
+    // The whole standard set, because the next one asked for is a stop and
+    // they all cost the same.
+    {"UIColor", true, "whiteColor", SomeColor},
+    {"UIColor", true, "blackColor", SomeColor},
+    {"UIColor", true, "grayColor", SomeColor},
+    {"UIColor", true, "darkGrayColor", SomeColor},
+    {"UIColor", true, "lightGrayColor", SomeColor},
+    {"UIColor", true, "clearColor", SomeColor},
+    {"UIColor", true, "redColor", SomeColor},
+    {"UIColor", true, "greenColor", SomeColor},
+    {"UIColor", true, "blueColor", SomeColor},
+    {"UIColor", true, "cyanColor", SomeColor},
+    {"UIColor", true, "yellowColor", SomeColor},
+    {"UIColor", true, "magentaColor", SomeColor},
+    {"UIColor", true, "orangeColor", SomeColor},
+    {"UIColor", true, "purpleColor", SomeColor},
+    {"UIColor", true, "brownColor", SomeColor},
 
     {"CAEAGLLayer", false, "setOpaque:", NilMethod},
     {"CAEAGLLayer", false, "setDrawableProperties:", NilMethod},
