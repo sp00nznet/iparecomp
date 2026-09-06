@@ -26,6 +26,12 @@ bool WindowPresent();
 int WindowWidth();
 int WindowHeight();
 
+// Write the next presented frame to `path` as a binary PPM. Answering "does it
+// draw" by reading a trace is inference; this is the picture. It happens
+// before the buffer swap, because after the swap the back buffer's contents
+// are undefined and a screenshot of undefined is a convincing black rectangle.
+void WindowCaptureNext(const char* path);
+
 // A touch, translated from the mouse. iPhone OS delivered these to the view as
 // a set of UITouch objects; the run loop asks for them here.
 struct Touch {

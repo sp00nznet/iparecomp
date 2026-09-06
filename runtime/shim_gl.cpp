@@ -19,6 +19,7 @@
 // the window's own framebuffer, so the OES calls answer plausibly and bind
 // zero. That keeps one copy out of every frame and needs no extensions.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "arm32_context.h"
@@ -89,7 +90,10 @@ void GlOrthof(Arm32Ctx* c) {
 }
 
 // --- arrays and drawing ----------------------------------------------------
+const void* g_vp = nullptr;
+
 void GlVertexPointer(Arm32Ctx* c) {
+  g_vp = Ap(c, 3);
   glVertexPointer(int(A(c, 0)), A(c, 1), int(A(c, 2)), Ap(c, 3));
 }
 void GlTexCoordPointer(Arm32Ctx* c) {
@@ -98,9 +102,35 @@ void GlTexCoordPointer(Arm32Ctx* c) {
 void GlColorPointer(Arm32Ctx* c) {
   glColorPointer(int(A(c, 0)), A(c, 1), int(A(c, 2)), Ap(c, 3));
 }
+// ARC_TRACE_DRAW=1 prints where each of the first few quads actually lands, in
+// window pixels, having pushed its vertices through the modelview, the
+// projection and the viewport. A list of matrix calls is something to reason
+// about; a corner at (-380, -552) is an answer.
 void GlDrawArrays(Arm32Ctx* c) {
+  static int shown = 0;
+  if (std::getenv("ARC_TRACE_DRAW") && shown < 64) {
+    ++shown;
+    GLfloat mv[16], pr[16];
+    GLint vp[4];
+    glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+    glGetFloatv(GL_PROJECTION_MATRIX, pr);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    const short* v = static_cast<const short*>(g_vp);
+    std::printf("[draw] %d verts ->", int(A(c, 2)));
+    for (int i = 0; i < int(A(c, 2)) && v; ++i) {
+      const float x = v[i * 4], y = v[i * 4 + 1];
+      const float ex = mv[0] * x + mv[4] * y + mv[12];
+      const float ey = mv[1] * x + mv[5] * y + mv[13];
+      const float cx = pr[0] * ex + pr[4] * ey + pr[12];
+      const float cy = pr[1] * ex + pr[5] * ey + pr[13];
+      std::printf(" (%.0f,%.0f)", vp[0] + (cx + 1) * vp[2] / 2,
+                  vp[1] + (cy + 1) * vp[3] / 2);
+    }
+    std::printf("  err=%#x\n", glGetError());
+  }
   glDrawArrays(A(c, 0), int(A(c, 1)), int(A(c, 2)));
 }
+
 
 // --- textures --------------------------------------------------------------
 void GlGenTextures(Arm32Ctx* c) {
@@ -114,7 +144,22 @@ void GlBindTexture(Arm32Ctx* c) { glBindTexture(A(c, 0), A(c, 1)); }
 void GlTexParameteri(Arm32Ctx* c) {
   glTexParameteri(A(c, 0), A(c, 1), int(A(c, 2)));
 }
+// ARC_TRACE_TEX=1 says how much of each uploaded texture is not black. A game
+// that draws perfect geometry out of empty textures looks exactly like a game
+// that draws nothing, and only one of those is a geometry problem.
 void GlTexImage2D(Arm32Ctx* c) {
+  if (std::getenv("ARC_TRACE_TEX")) {
+    const unsigned char* px = static_cast<const unsigned char*>(Ap(c, 8));
+    const size_t n = size_t(int(A(c, 3))) * size_t(int(A(c, 4))) * 4;
+    size_t lit = 0, alpha = 0;
+    for (size_t i = 0; px && i + 3 < n; i += 4) {
+      if (px[i] || px[i + 1] || px[i + 2]) ++lit;
+      if (px[i + 3]) ++alpha;
+    }
+    std::printf("[tex] %dx%d fmt=%#x type=%#x data=%p rgb=%zu%% a=%zu%%\n",
+                int(A(c, 3)), int(A(c, 4)), A(c, 6), A(c, 7), Ap(c, 8),
+                n ? lit * 400 / n : 0, n ? alpha * 400 / n : 0);
+  }
   glTexImage2D(A(c, 0), int(A(c, 1)), int(A(c, 2)), int(A(c, 3)), int(A(c, 4)),
                int(A(c, 5)), A(c, 6), A(c, 7), Ap(c, 8));
 }

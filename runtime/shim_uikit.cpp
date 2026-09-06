@@ -39,8 +39,16 @@ namespace {
 // its own projection, so these are deliberately not the window's dimensions.
 constexpr int kScreenWidth = 320;
 constexpr int kScreenHeight = 480;
-constexpr int kWindowWidth = 480;
-constexpr int kWindowHeight = 320;
+// The window is the device's framebuffer, and the device's framebuffer is
+// portrait. A landscape game rotates its own content into it -- Canabalt sets
+// up `glOrthof(0, backingWidth, backingHeight, 0)` and then
+// `translate(w/2, h/2); rotate(90); translate(-h/2, -w/2)` -- so handing it a
+// landscape one makes it rotate a second time and everything lands off the
+// bottom of the screen. The backing size is read back through
+// `glGetRenderbufferParameterivOES`, which is why this is the number that
+// decides it.
+constexpr int kWindowWidth = 320;
+constexpr int kWindowHeight = 480;
 
 uint32_t Bits(float f) {
   uint32_t u;
@@ -440,6 +448,10 @@ void RunFrameLoop(Arm32Ctx* c) {
     ARC_W(c, 0, g_link_target);
     ARC_W(c, 1, g_link_selector);
     arc_dispatch(c, imp);
+    // ARC_SHOT=<path> writes the last frame out, so "does it draw" has an
+    // answer that is not a trace.
+    if (const char* shot = std::getenv("ARC_SHOT"))
+      if (frames + 1 == limit) WindowCaptureNext(shot);
     if (!WindowPresent()) break;
     ++frames;
   }

@@ -3,9 +3,12 @@
 #include "window.h"
 
 #include <cstdio>
+#include <string>
+#include <vector>
 
 #if defined(ARC_HAVE_SDL2)
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_opengl.h>
 #endif
 
 namespace arc {
@@ -18,6 +21,30 @@ SDL_GLContext g_context = nullptr;
 int g_width = 0, g_height = 0;
 bool g_open = false;
 Touch g_pending;
+std::string g_capture;
+
+#if defined(ARC_HAVE_SDL2)
+void CaptureNow(const char* path) {
+  std::vector<unsigned char> px(size_t(g_width) * size_t(g_height) * 3);
+  glReadPixels(0, 0, g_width, g_height, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+  std::FILE* f = std::fopen(path, "wb");
+  if (!f) {
+    std::printf("window: cannot write %s\n", path);
+    return;
+  }
+  std::fprintf(f, "P6\n%d %d\n255\n", g_width, g_height);
+  // GL hands back the bottom row first; every image format expects the top.
+  for (int y = g_height - 1; y >= 0; --y)
+    std::fwrite(px.data() + size_t(y) * size_t(g_width) * 3, 3,
+                size_t(g_width), f);
+  std::fclose(f);
+  size_t lit = 0;
+  for (size_t i = 0; i < px.size(); i += 3)
+    if (px[i] || px[i + 1] || px[i + 2]) ++lit;
+  std::printf("window: wrote %s, %zu%% of pixels are not black\n", path,
+              lit * 100 / (px.size() / 3));
+}
+#endif
 
 }  // namespace
 
@@ -68,6 +95,10 @@ int WindowHeight() { return g_height; }
 bool WindowPresent() {
 #if defined(ARC_HAVE_SDL2)
   if (!g_open) return false;
+  if (!g_capture.empty()) {
+    CaptureNow(g_capture.c_str());
+    g_capture.clear();
+  }
   SDL_GL_SwapWindow(g_window);
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
@@ -100,6 +131,8 @@ bool WindowPresent() {
   return false;
 #endif
 }
+
+void WindowCaptureNext(const char* path) { g_capture = path ? path : ""; }
 
 Touch WindowTakeTouch() {
   const Touch t = g_pending;

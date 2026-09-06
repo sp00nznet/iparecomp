@@ -246,6 +246,19 @@ void arc_dispatch(Arm32Ctx* c, uint32_t target) {
   arc_dispatch_miss(c, target);
 }
 
+/* ARC_TRACE_CALLS=<substring>, or "*" for everything: a shell cannot easily
+   pass an empty value. A name in the trail says the guest called memmove; the
+   arguments say whether it asked for a sane length. This is what located an
+   allocation of eighteen exabytes on the other project, after five rounds of
+   inference had not. */
+static int arc_trace_call_filter(const char* name) {
+  static const char* filter;
+  static int checked;
+  if (!checked) { filter = getenv("ARC_TRACE_CALLS"); checked = 1; }
+  return filter && name &&
+         (!*filter || filter[0] == '*' || strstr(name, filter) != NULL);
+}
+
 void arc_dispatch_miss(Arm32Ctx* c, uint32_t target) {
   // The Thumb bit is not part of any address; strip it before comparing, or a
   // native reached through `blx` never matches the one that was registered.
@@ -255,26 +268,21 @@ void arc_dispatch_miss(Arm32Ctx* c, uint32_t target) {
   for (size_t i = 0; i < g_ctx_native_count; ++i) {
     if (g_ctx_natives[i].address != addr) continue;
     arc_trace_note(g_ctx_natives[i].name);
+    /* The same argument trace the plain natives get. Most of the GL surface is
+       registered this way, and "it called glDrawArrays" says nothing that "it
+       called glDrawArrays with a count of zero" does not say better. */
+    if (arc_trace_call_filter(g_ctx_natives[i].name))
+      fprintf(stderr, "[call] %-26s r0=%#x r1=%#x r2=%#x r3=%#x\n",
+              g_ctx_natives[i].name, c->r[0], c->r[1], c->r[2], c->r[3]);
     g_ctx_natives[i].fn(c);
     return;
   }
   for (size_t i = 0; i < g_native_count; ++i) {
     if (g_natives[i].address != addr) continue;
     arc_trace_note(g_natives[i].name);
-    // Optional argument trace. A name in the trail says the guest called
-    // memmove; the arguments say whether it asked for a sane length. This is
-    // what located an allocation of eighteen exabytes on the other project,
-    // after five rounds of inference had not.
-    {
-      static const char* filter;
-      static int checked;
-      if (!checked) { filter = getenv("ARC_TRACE_CALLS"); checked = 1; }
-      // "*" matches everything: a shell cannot easily pass an empty value.
-      if (filter && (!*filter || filter[0] == '*' ||
-                     strstr(g_natives[i].name, filter)))
-        fprintf(stderr, "[call] %-12s r0=%#x r1=%#x r2=%#x r3=%#x\n",
-                g_natives[i].name, c->r[0], c->r[1], c->r[2], c->r[3]);
-    }
+    if (arc_trace_call_filter(g_natives[i].name))
+      fprintf(stderr, "[call] %-26s r0=%#x r1=%#x r2=%#x r3=%#x\n",
+              g_natives[i].name, c->r[0], c->r[1], c->r[2], c->r[3]);
     const uint32_t* stack = (const uint32_t*)(uintptr_t)ARC_SP(c);
     c->r[0] = g_natives[i].fn(c->r[0], c->r[1], c->r[2], c->r[3],
                               stack[0], stack[1], stack[2], stack[3]);
