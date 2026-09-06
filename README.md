@@ -22,7 +22,7 @@ duplicate the effort.
 
 ### Recent changes
 
-**Current version: v0.2.0 — _"Conformance"_ (September 2026).**
+**Current version: v0.3.0 — _"Stripped"_ (September 2026).**
 See the [Changelog](#changelog) for what landed and when.
 
 **New here?** [Getting started](docs/GETTING-STARTED.md) walks an `.ipa` all
@@ -48,12 +48,40 @@ this repo — that separation is much cheaper to keep than to retrofit.
 The name is the file extension, not the platform. Nothing here uses Apple's
 branding, trademarks, code, headers or SDKs.
 
+## Licence
+
+**MIT.** See [LICENSE](LICENSE) for the full text. Contributions must be your
+own work, offered under the same terms.
+
 ## Legal / content policy
 
-Tools only. No app code, no app assets, no extracted art, no save data, no
+**Tools only.** No app code, no app assets, no extracted art, no save data, no
 publisher binaries — `.gitignore` blocks all of it, deliberately. You supply
-your own legally obtained `.ipa`; everything here operates on a file you
-already have. Licensed MIT; contributions must be your own work.
+your own legally obtained `.ipa`, and everything here operates on a file you
+already have. Nothing in this repository downloads, distributes, or contains
+any part of any application.
+
+**No Apple code, and no relationship with Apple.** iOS, iPhone, iPad, App
+Store, Xcode, FairPlay and Objective-C are trademarks of Apple Inc. This
+project is not affiliated with, authorised by, endorsed by, or connected to
+Apple in any way. Apple owns iOS and the platform this software targets. No
+Apple source code, headers, SDKs, binaries, branding or documentation is used
+here or vendored here — the framework surface is reimplemented from the
+observable behaviour a binary depends on, and every class and selector name is
+one the app itself already contains.
+
+**No circumvention.** `ipa_probe.py` detects FairPlay encryption and *stops*.
+There is no decryption here and none will be accepted: a binary with
+`cryptid=1` is reported as out of scope, and that is the end of it.
+
+**Why this exists.** The 32-bit iOS catalogue stopped running on any shipping
+device with iOS 11. This is a preservation and educational project about
+static recompilation — how a Mach-O loads, how ARM lifts to C, how a dynamic
+dispatch runtime is answered — aimed at software that no longer runs anywhere.
+
+**If a rights holder wants this taken down, they can have it.** Open an issue
+or contact the maintainer and it will be dealt with in good faith and without
+argument. Nothing here is intended to cause anyone a problem.
 
 ## Three things that make this harder than ARM64 Android
 
@@ -80,9 +108,11 @@ which a given byte is; decode Thumb as ARM and you get plausible-looking
 garbage. ARM64 had no equivalent of this, and it is the single largest source
 of new work.
 
-The symbol table's `N_ARM_THUMB_DEF` bit is the only reliable record of which
-set each function is in, which makes a *stripped* binary considerably worse
-than a merely-old one.
+Two things record which set a function is in, and both are exact rather than
+inferred: the symbol table's `N_ARM_THUMB_DEF` bit, and — on binaries new
+enough to have it — the low bit of each `LC_FUNCTION_STARTS` address. A
+stripped binary with neither is the genuinely bad case; a stripped binary
+*with* function starts is fine, which is most of the post-2011 catalogue.
 
 **3. Most control flow is `objc_msgSend`.** An iOS app dispatches dynamically
 by selector, and no static analysis resolves that. So it is not lifted at all
@@ -231,6 +261,22 @@ Three iOS 3.x games, probed with the tools in this repo:
 | frameworks | 14 | 14 | — |
 | ObjC classes / selrefs | 49 / 506 | 38 / 866 | — |
 
+A fourth, added because it is the opposite shape — modern, stripped, and mixed:
+
+| | Flappy Bird 1.2 |
+|---|---|
+| slice | armv7 + armv7s |
+| `__TEXT` | decrypted |
+| `__text` | 0.75 MB |
+| boundaries | `LC_FUNCTION_STARTS`, **3,169 functions, 100% coverage** |
+| symbols | **1 defined** — fully stripped |
+| **Thumb** | **39%** (1,231 Thumb, 1,938 ARM) |
+| instructions | 201,776 |
+| ObjC classes / selrefs | 134 / 1,804 |
+
+This is the first target that exercises interworking, and the first where the
+symbol table is no help at all.
+
 Canabalt being 100% ARM is why it was picked as the first port: the emitter can
 be built and validated with no interworking at all, and 626 functions is small
 enough to lift in full and check against an emulator.
@@ -296,6 +342,33 @@ The reasoning behind each of these is in
       outstanding imports turn out to be.
 
 ## Changelog
+
+### v0.3.0 — _"Stripped"_ (September 2026)
+
+A binary with one symbol in it now lifts, which opens the post-2011 catalogue.
+
+- **`LC_FUNCTION_STARTS` is a boundary source**, not just a number in the
+  triage report. Whichever of it and the symbol table accounts for more of
+  `__text` wins. The low bit of each start address gives the ARM/Thumb mode
+  exactly, the same convention `N_ARM_THUMB_DEF` uses — so a stripped binary's
+  mode is read, not inferred.
+- **The starts table was being read from the wrong base.** The deltas
+  accumulate from the Mach-O header — `__TEXT` — and the code took
+  `segments[0]`, which is `__PAGEZERO` at address 0. Every function came out
+  one `__TEXT` vmaddr too low. Never noticed, because nothing had consumed it.
+- **`movw` and `movt`.** A 32-bit constant with no literal pool to load it
+  from is a `movw`/`movt` pair, and `movt` is the only move that reads its own
+  destination. `movw` alone was blocking 2,692 of Flappy Bird's 3,169
+  functions.
+- The triage report now names which source the boundaries came from, because
+  "3,169 functions from the symbol table" was a lie on a binary with one
+  symbol in it.
+- Measured on *Flappy Bird 1.2* — stripped, armv7/armv7s, 39% Thumb: **0 → 
+  3,169 functions**, 100% of `__text` covered, and lifting goes from 11.0% to
+  **79.9% of functions and 99.2% of instructions**. What remains is Thumb-2:
+  IT blocks, `cbz`/`cbnz`, `tbb`, `strd`/`ldrd`, NEON.
+- Canabalt is unchanged throughout: 626/626, 4,044/4,044 per instruction,
+  857/857 over 144 whole functions, and a byte-identical rendered frame.
 
 ### v0.2.0 — _"Conformance"_ (September 2026)
 

@@ -62,7 +62,7 @@ SFT = {1: "asr", 2: "lsl", 3: "lsr", 4: "ror", 5: "rrx",
 SFT_REG = {6, 7, 8, 9, 10}
 
 ALU3 = {"add", "adc", "sub", "sbc", "rsb", "rsc", "and", "orr", "eor", "bic"}
-ALU2 = {"mov", "mvn"}
+ALU2 = {"mov", "mvn", "movw", "movt"}
 TEST = {"cmp", "cmn", "tst", "teq"}
 SHIFTOP = {"lsl", "lsr", "asr", "ror", "rrx"}
 # (bytes, signed) for each load/store width.
@@ -332,13 +332,21 @@ class Lifter:
             raise Unsupported(form(ins))
         rd = self.dest(ins, ops[0])
         v, carry = self.operand(ins, ops[1])
-        expr = "r" if op == "mov" else "r"
-        body = f"uint32_t r = {'' if op == 'mov' else '~'}({v}); "
+        # movw is a plain move of a 16-bit immediate -- the width is a fact
+        # about the encoding, not about the semantics. movt is the one form
+        # here that reads its own destination: it replaces the top halfword
+        # and keeps the bottom, which is how a 32-bit constant is built out of
+        # a movw/movt pair when there is no literal pool to load it from.
+        if op == "movt":
+            cur = self.read(ins, self.reg(ins, ops[0].reg))
+            body = f"uint32_t r = ({cur} & 0xffffu) | ((({v}) & 0xffffu) << 16); "
+            return "{ " + body + self.write(rd, "r") + " }"
+        body = f"uint32_t r = {'~' if op == 'mvn' else ''}({v}); "
         if self.sets_flags(ins):
             body += "ARC_NZ(c, r); "
             if carry is not None:
                 body += f"c->cf = {carry}; "
-        return "{ " + body + self.write(rd, expr) + " }"
+        return "{ " + body + self.write(rd, "r") + " }"
 
     def _test(self, ins, op: str) -> str:
         ops = ins.operands

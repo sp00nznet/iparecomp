@@ -154,8 +154,21 @@ for having one.
 
 ### Where a function ends, and where the data starts
 
-Function boundaries come from the symbol table, and a symbol-delimited function
-includes the literal pool sitting at its end. A pool disassembles perfectly
+Function boundaries come from the symbol table, or from `LC_FUNCTION_STARTS`
+where the binary is new enough to carry it -- whichever accounts for more of
+`__text`. Both record the ARM/Thumb mode exactly: the symbol table in
+`N_ARM_THUMB_DEF`, the starts table in the low bit of each address, the same
+convention in both places. That matters more than it sounds, because a
+stripped binary has no symbols at all and the starts are then the only
+evidence there is; Flappy Bird has one defined symbol and 3,169 function
+starts covering 100% of its `__text`.
+
+The deltas in that table accumulate from the Mach-O header's address -- the
+first segment that maps file bytes, which is `__TEXT`. Accumulating from
+`segments[0]` instead takes `__PAGEZERO`, which sits at address 0 with no
+content, and puts every function one `__TEXT` vmaddr too low.
+
+Either way, a delimited function includes the literal pool sitting at its end. A pool disassembles perfectly
 into plausible nonsense -- a word of zeroes is `andeq r0, r0, r0`, which is why
 that is the fourth most common mnemonic in Canabalt and `muleq` the thirteenth.
 

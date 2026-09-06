@@ -188,12 +188,24 @@ class MachO:
         return out
 
     def starts(self):
-        """Function start addresses from LC_FUNCTION_STARTS, or [] if absent."""
+        """Function start addresses from LC_FUNCTION_STARTS, or [] if absent.
+
+        The deltas accumulate from the address of the Mach-O header, which is
+        the first segment that actually maps file bytes -- __TEXT. Starting
+        from `segments[0]` instead takes __PAGEZERO, which is at address 0 with
+        no content, and puts every function one __TEXT-vmaddr too low.
+
+        The low bit is set on a Thumb function, exactly as it is in a symbol's
+        value. That is the whole of the ARM/Thumb evidence in a stripped
+        binary, and it is exact rather than inferred.
+        """
         if not self.function_starts:
             return []
         off, size = self.function_starts
         buf = self.data[self.off + off:self.off + off + size]
-        base = self.segments[0][1] if self.segments else 0
+        base = next((v for n, v, _, _, fs, _ in self.segments
+                     if fs and n != "__PAGEZERO"),
+                    self.segments[0][1] if self.segments else 0)
         addr, i, out = base, 0, []
         while i < len(buf):
             delta, i = _uleb(buf, i)
@@ -244,8 +256,8 @@ def read_app(path: str):
     return exe, z.read(plist[:-len("Info.plist")] + exe), info
 
 
-def functions(m: MachO):
-    """[(addr, size, is_thumb)] over __TEXT,__text, from the symbol table.
+def functions_sourced(m: MachO):
+    """([(addr, size, is_thumb)], from_starts) over __TEXT,__text.
 
     There is no .eh_frame equivalent to lean on here: these binaries predate
     LC_FUNCTION_STARTS, so the symbol table is the only boundary evidence, and
@@ -257,14 +269,33 @@ def functions(m: MachO):
     if not code:
         return []
     end = addr + len(code)
-    syms = sorted({(v & ~1, t) for (_, v, t, d) in m.symbols()
-                   if d and addr <= (v & ~1) < end})
-    out = []
-    for i, (a, t) in enumerate(syms):
-        nxt = syms[i + 1][0] if i + 1 < len(syms) else end
-        if nxt > a:
-            out.append((a, nxt - a, t))
-    return out
+
+    def spans(marks):
+        """[(addr, size, is_thumb)] from sorted (addr, thumb) boundaries."""
+        out = []
+        for i, (a, t) in enumerate(marks):
+            nxt = marks[i + 1][0] if i + 1 < len(marks) else end
+            if nxt > a:
+                out.append((a, nxt - a, t))
+        return out
+
+    syms = spans(sorted({(v & ~1, t) for (_, v, t, d) in m.symbols()
+                         if d and addr <= (v & ~1) < end}))
+    starts = spans(sorted({(a & ~1, bool(a & 1)) for a in m.starts()
+                           if addr <= (a & ~1) < end}))
+
+    # Whichever accounts for more of __text. A stripped binary has no symbols
+    # at all and reports nothing without this; a binary with both is better
+    # served by the starts, which are complete where symbols leave the literal
+    # pools uncovered.
+    if sum(n for _, n, _ in starts) > sum(n for _, n, _ in syms):
+        return starts, True
+    return syms, False
+
+
+def functions(m: MachO):
+    """[(addr, size, is_thumb)] over __TEXT,__text. See functions_sourced."""
+    return functions_sourced(m)[0]
 
 
 def analyse(m: MachO):
@@ -278,7 +309,7 @@ def analyse(m: MachO):
     addr, code = m.text()
     if not code:
         return None
-    fns = functions(m)
+    fns, from_starts = functions_sourced(m)
 
     md_a = Cs(CS_ARCH_ARM, CS_MODE_ARM | CS_MODE_LITTLE_ENDIAN)
     md_t = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
@@ -309,7 +340,7 @@ def analyse(m: MachO):
     thumb_fns = sum(1 for _, _, t in fns if t)
     return dict(total=total, hist=hist, hard=hard, size=len(code),
                 fns=len(fns), thumb_fns=thumb_fns, arm_fns=len(fns) - thumb_fns,
-                covered=covered,
+                from_starts=from_starts, covered=covered,
                 coverage=100.0 * covered / len(code) if code else 0.0)
 
 
@@ -360,7 +391,13 @@ def report(path, exe, info, ms, nslices, sel, an, out):
     w(f"- symbols: {len(defined):,} defined, {len(undef):,} undefined\n")
 
     if an:
-        w(f"- functions from the symbol table: **{an['fns']:,}** "
+        # Say which source the boundaries actually came from: on a stripped
+        # binary the symbol table contributes nothing and the starts are
+        # everything, and a reader deciding whether a title is viable needs to
+        # know which of the two they are looking at.
+        source = ("`LC_FUNCTION_STARTS`" if an.get("from_starts")
+                  else "the symbol table")
+        w(f"- functions from {source}: **{an['fns']:,}** "
           f"covering {an['coverage']:.1f}% of `__text`\n")
         w(f"- instruction sets: **{an['arm_fns']:,} ARM, {an['thumb_fns']:,} Thumb** "
           f"({100.0 * an['thumb_fns'] / an['fns']:.0f}% Thumb)\n"

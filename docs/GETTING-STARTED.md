@@ -83,18 +83,20 @@ result. These armv6-era binaries predate `LC_FUNCTION_STARTS`, so the symbol
 table is the only boundary evidence and 80–92% coverage is normal — the
 remainder is literal pools mixed into the code, not missing functions.
 
-A **stripped** binary is the bad case, and it looks like this:
+A **stripped** binary has no symbols at all, and on anything post-2011 that is
+survivable, because `LC_FUNCTION_STARTS` carries the same evidence:
 
 ```
 - functions from `LC_FUNCTION_STARTS`: **3,169**
 - symbols: 1 defined, 457 undefined
-- functions from the symbol table: **0** covering 0.0% of `__text`
-- instructions: 0 (0 distinct mnemonics)
+- functions from `LC_FUNCTION_STARTS`: **3,169** covering 100.0% of `__text`
+- instruction sets: **1,938 ARM, 1,231 Thumb** (39% Thumb)
 ```
 
-Boundaries exist here — 3,169 of them — but no symbol survives to say which
-instruction set each function is in, and the analysis is symbol-driven today.
-See [Known limits](#known-limits).
+One defined symbol, and still complete coverage. The low bit of each start
+address says ARM or Thumb, exactly as `N_ARM_THUMB_DEF` does in a symbol —
+so the mode is read, not guessed. A stripped binary with *neither* source is
+the genuinely bad case.
 
 **Percentage Thumb.** A binary that is entirely one instruction set is a
 dramatically easier first lift, because interworking never arises. `0% Thumb`
@@ -386,13 +388,14 @@ Those errors are the shim being correct.
 
 Worth knowing before you pick a title.
 
-- **Stripped binaries do not lift yet.** `LC_FUNCTION_STARTS` is parsed and
-  reported, but boundaries and the ARM/Thumb split are taken from the symbol
-  table, so a binary with no symbols analyses as zero functions even when
-  thousands of starts are recorded. This is the main thing standing between the
-  toolkit and post-2011 titles.
-- **Interworking is lifted but not yet exercised on a real target.** Canabalt
-  is 0% Thumb by design, so the mixed-mode path has no port behind it yet.
+- **Thumb-2 is incomplete.** A mixed ARM/Thumb binary lifts, but not all of
+  it: IT blocks, `cbz`/`cbnz`, `tbb`, `strd`/`ldrd` and most of NEON have no
+  emitter yet. Flappy Bird — stripped, 39% Thumb — reaches 99.2% of
+  instructions and 79.9% of whole functions, and `--report` ranks exactly
+  what is missing by how many functions each form blocks.
+- **Interworking is lifted but has no port behind it yet.** Canabalt is 0%
+  Thumb by design, so the mixed-mode path is exercised by the lifter and the
+  conformance suite but not yet by a running game.
 - **Some PNGs in a shipped `.ipa` are Apple's CgBI variant** and libpng refuses
   them (`libpng error: CgBI: unhandled critical chunk`). It is a minority — 7
   of Canabalt's 73, all gameplay art — so the menu loads from a stock `.ipa`

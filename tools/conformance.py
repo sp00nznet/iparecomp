@@ -84,6 +84,11 @@ CASES = [
     ("addr: ldrh [r,#imm]", 0xE1D100B4, False, "halfword, its own encoding"),
     ("addr: ldrsb [r,#imm]", 0xE1D100D4, False, "sign-extending load"),
 
+    # 3b. A 32-bit constant with no literal pool: movw builds the bottom half
+    #     and movt the top, and movt has to keep the half it is not writing.
+    ("const: movw", 0xE3010234, False, "16-bit immediate, top cleared"),
+    ("const: movt", 0xE3410234, False, "top half, bottom preserved"),
+
     # 4. The PC is a general register, and reads of it are folded to constants
     #    at lift time -- which is only correct if the constant is the one the
     #    hardware would have produced.
