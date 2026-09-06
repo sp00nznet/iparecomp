@@ -14,8 +14,11 @@
                                         └─▶ lift_verify.py ──▶ Unicorn
 ```
 
-Everything except the shim and the ObjC runtime exists today. This document is
-mostly about the emitter, because that is the part with real decisions in it.
+All of it exists today, and a lifted game reaches its own frame loop and draws.
+The first half of this document is the emitter, because that is where the hard
+decisions were; the second half -- from [Running it](#running-it) on -- is what
+running the result taught, which is mostly that a wrong answer with a plausible
+source is worse than a missing one.
 
 ## What the loader has to know that ELF did not
 
@@ -802,6 +805,125 @@ Seeding matters too, and less than it looked. Every register held a pointer, so
 the case was *dropped* rather than compared. A third of the registers are small
 values now. That alone did not surface the bug -- the form key did -- but a
 dropped case is a silent one either way.
+
+### A view's frame is its own, not the screen's
+
+Every `-frame` answered with the window's rect. That is right for exactly one
+view -- the full-screen GL view -- and wrong for every other one, and the way
+it was wrong is instructive: `SSText` is a `UIView` subclass that centres its
+glyphs in `frame.size`. Told its frame was 320x480 when its own bitmap is
+128x32, it put the pen at x=132 and every glyph landed outside the texture. The
+draw calls were correct the whole time.
+
+A view keeps the rect it was given now. A view nobody framed still gets the
+window, because the full-screen view is precisely the one that never sets a
+frame -- so the default that was wrong for everything is right for the one case
+it was written for.
+
+The general shape: a shim that answers every caller with the value one caller
+needs is not a stub, it is a wrong answer with a plausible source.
+
+### Two tables claiming one selector
+
+`+[UIImage imageNamed:]` was registered twice -- once as a nil stub in one
+shim file, once for real in another -- and the nil one won on table order, so
+no image in the game ever loaded. Nothing reported it, because both
+registrations were legal.
+
+`HostMethod` refuses a duplicate by name now. The same class of bug reappeared
+immediately in the other direction: two `NilMethod` entries in the UIKit table
+shadowing real `NSNotificationCenter` and `NSValue` implementations in the
+object table. A registry with silent last-write-wins semantics turns a merge
+conflict into a behaviour change nobody can see.
+
+### The rotation belongs in clip space
+
+The guest is handed a portrait framebuffer, because that is what a 2009 device
+gives it, and it does its own quarter turn on top of that. Undoing that turn by
+rendering to a texture and blitting it rotated needs a framebuffer object and
+two passes.
+
+It is one matrix instead. The projection becomes `R(90) . Ortho`, so portrait
+clip coordinates land on a landscape window, and the guest's transform chain is
+never touched -- the turn it does is still the one the hardware asked for.
+`glGetRenderbufferParameterivOES` reports the buffer turned a quarter turn,
+which is what the guest sizes everything from, and the window is 480x320.
+
+### A touch is one finger, and the method says the phase
+
+UIKit hands a touch to a view as an `NSSet` of `UITouch`, and Canabalt's
+`FlxGLView` passes `[event allTouches]` straight to `-[FlxGlobal
+processTouches:]`. The binary asks a `UITouch` for exactly one thing --
+`locationInView:` -- and never for its phase, because which of
+`touchesBegan/Moved/Ended:withEvent:` was called says that already. So the
+whole class is two methods and a point.
+
+The harder half is *which* view to send it to. A shim only ever sees the
+instance it is handed, and the one moment the GL view is identifiable is when
+something frames it -- so that is where it is caught.
+
+`ARC_TAP="x,y[,frame]"` taps the window at a point, which makes "does the PLAY
+button start the game" a question that can be asked without a person clicking:
+
+```
+[touch] touchesBegan:withEvent: at (30,400)
+[touch] touchesEnded:withEvent: at (30,400)
+```
+
+Five shims were needed behind that tap, each named by the run that stopped on
+it, and two are worth keeping:
+
+- **`-performSelector:withObject:afterDelay:` must actually be delayed.**
+  Running it inline puts the new state's construction inside the old state's
+  render. Queued, and drained by the frame loop -- the same lesson as the
+  operation queue and the animation completions.
+- **A boxed pointer keys on what it boxes.** The game keys its per-class
+  sprite setup by `[NSValue valueWithPointer:[self class]]`, so two boxes
+  around the same class have to be the same dictionary key. Boxing by
+  identity makes every lookup a miss and every setup run again.
+- **`+initialize` may nest.** A flat "one at a time" guard that marks a class
+  done and then never runs it is worse than no guard: the `done` entry is what
+  terminates the recursive case, and the saved context is what lets the outer
+  one carry on.
+
+### A drawing context has a transform, and text goes through it
+
+ABOUT was drawn as HDOUC. Not the wrong glyphs -- the right ones with their
+tops cut off. Canabalt sets its text context up with `translate(0, 2);
+translate(0, 30); scale(1, -1)` so it can lay text out top-down, and the bitmap
+context ignored all three: text drawn at y=21 in that space belongs at y=11
+from the bottom, so every glyph sat ten rows too high and lost its apex to the
+edge of the bitmap. An `A` without its apex is an `H`.
+
+The context carries a transform now -- translate and scale, which is all the
+guest uses -- and `CGContextShowGlyphsAtPoint` puts the pen through it.
+`About` goes from 360 pixels landed and 104 outside to 420 and none.
+
+The diagnostic mattered as much as the fix. A `CGGlyph` is an index into a
+font, so a log full of numbers cannot distinguish "the buttons are illegible"
+from "the buttons say the wrong thing", and those are different bugs with
+different causes. Turning the indices back into characters through the font's
+own cmap is what showed the glyphs were right all along:
+
+```
+text "About"
+  420 pixels landed, 0 fell outside
+```
+
+### A run that draws can record itself
+
+A screenshot proves a frame drew; it does not prove the next hundred do, and a
+hand-held screen capture of a window is not reproducible. `ARC_SHOT_EVERY=n`
+writes every nth frame, numbered, and `ARC_TAP` takes a list
+(`x,y,frame;x,y,frame`), so a walk through the menus is a recording: no window
+chrome, no cursor, and the same frames every time.
+
+One note from building it, because it looks exactly like a bug in the feature.
+The multi-tap parser was written once and never reached the file -- the script
+applying it asserted on a later hunk and exited before saving, so the
+single-tap version stayed and the second tap silently did nothing. "The code I
+wrote is not the code that is running" is indistinguishable from "the code is
+wrong" until you read the file back.
 
 ## The shim surface
 

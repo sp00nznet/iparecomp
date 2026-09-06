@@ -3,15 +3,17 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: the game runs, and says so.** All 626 of Canabalt's functions
-lift to C; 23,111 per-instruction cases over 191 operand forms and 2,967
-whole-function cases agree with Unicorn. The image maps at its own link address with a zero slide,
-`objc_msgSend` dispatches into lifted code, and the guest now runs from
-`_start` through `applicationDidFinishLaunching:` and the whole flixel setup to
-`exit(0)`. What it asks for on the way is measured, not guessed: one run names
-the 18 messages and 27 imports still outstanding, and they are now the window
-itself -- UIScreen, UIWindow, CADisplayLink, NSRunLoop -- plus OpenGLES and
-audio. See [Milestones](#milestones).
+**Status: a lifted game draws its menu, and answers a tap.** All 626 of
+Canabalt's functions lift to C; 23,111 per-instruction cases over 191 operand
+forms and 2,967 whole-function cases agree with Unicorn. The image maps at its
+own link address with a zero slide, `objc_msgSend` dispatches into lifted code,
+and the guest runs from `_start` through the whole launch into an SDL window
+driving its own frame loop -- textures uploaded, text rasterised through
+FreeType, the menu on screen the right way up, and a tap on a button running
+that button's action. What it still asks for is measured, not guessed: one run
+reports **115 imports claimed and 32 still owed**, and tapping PLAY builds
+`PlayState` and faults there, which is where the work is.
+See [Milestones](#milestones).
 
 ---
 
@@ -74,8 +76,9 @@ than a merely-old one.
 **3. Most control flow is `objc_msgSend`.** An iOS app dispatches dynamically
 by selector, and no static analysis resolves that. So it is not lifted at all
 — it becomes a shim boundary. The ObjC half of the app is answered by a
-runtime while the C/C++ half is compiled, which is what makes a game with 38
-classes and 866 selectors a far smaller job than its framework list suggests.
+runtime while the C/C++ half is compiled, which is what makes a game with a
+few dozen classes and a few hundred selectors a far smaller job than its
+framework list suggests.
 
 There is also no easy path: androidrecomp gets to run its target natively on an
 arm64 host and debug the shim before any lifting exists. Nothing runs armv6, so
@@ -97,12 +100,16 @@ iparecomp is a lifting project from day one.
 | `runtime/arc_boot` | Starts the guest and says where it stopped: the trap, a backtrace through lifted code, and the trail of calls out to the host. |
 | `runtime/arc_mem` | The guest's heap and stack, below 4 GB, because a 32-bit guest cannot hold a host pointer. |
 | `runtime/objc_host` | Framework classes as real class objects in guest memory, so the guest can hold them, send to them and inherit from them. |
+| `runtime/shim_*` | The framework surface itself, one file per area: UIKit, Foundation and the ObjC object graph, CoreGraphics, OpenGLES, images, fonts, audio, libSystem. Each is a table of selectors and C symbols, so what is answered and what is not is a list you can read. |
+| `runtime/window` | An SDL window with a compatibility GL context, the frame loop that stands in for `CADisplayLink` and `NSRunLoop`, the quarter turn from the guest's portrait framebuffer to a landscape window, and frame capture. |
 | `tools/objc_dump.py` | Reads the Objective-C class table straight out of `__DATA` -- classes, methods, selectors, and each method's implementation address. An iOS host contract is a set of classes, and this is how you discover one. |
 | `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
 
 ## Building
 
-CMake 3.20+ and any C++17 compiler. zlib and SDL2 are optional.
+CMake 3.20+ and any C++17 compiler. zlib, SDL2, libpng and FreeType are each
+optional, and each one that is missing removes only the piece it backs -- no
+SDL2 is a run with no window, no FreeType is a run with no text.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -111,6 +118,11 @@ cmake --build build
 ./build/arc_selftest                       # ARM semantics, no .ipa needed
 ./build/ipa_host path/to/Payload/Game.app/Game
 ```
+
+On Windows add
+`-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake` so CMake
+finds those four. A toolchain file only takes effect on a fresh cache,
+so delete `build/` if you add it later.
 
 Lift a binary and check the result against an emulator:
 
@@ -126,11 +138,38 @@ Run it, and see where it stops:
 ```sh
 ./build/ipa_host --run path/to/Game         # stop at the first missing piece
 ./build/ipa_host --permissive path/to/Game  # answer nil and list them all
+./build/ipa_host --permissive --bundle=path/to/Game.app path/to/Game.app/Game
 ```
 
-On Windows add `-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake`
-so CMake finds zlib and SDL2. A toolchain file only takes effect on a fresh
-cache, so delete `build/` if you add it later.
+`--bundle` is what makes `pathForResource:ofType:` resolve, so a game only
+loads its own art and fonts with it. Note that PNGs inside a shipped `.ipa` are
+usually Apple's CgBI variant -- a private chunk and byte-swapped, premultiplied
+channels -- and libpng refuses them outright:
+
+```
+libpng error: CgBI: unhandled critical chunk
+```
+
+There is no de-cruncher here. Convert the bundle's PNGs back to standard ones
+first, with any of the tools that do it, and point `--bundle` at that copy.
+
+### Driving a run without a person at the keyboard
+
+A frame loop is by construction a run that never finishes, and a question like
+"does the menu draw" or "does PLAY start the game" should not need someone
+watching a window. These are read from the environment:
+
+| Knob | What it does |
+|---|---|
+| `ARC_MAX_FRAMES=n` | Stop the frame loop after `n` frames and report, instead of running until the window closes. |
+| `ARC_TAP="x,y[,frame][;x,y,frame...]"` | Tap the window at those points, in window pixels, at those frames (200 by default): down, then up four frames later, because a button wants both halves. A list makes a walk through the menus repeat exactly. |
+| `ARC_SHOT=<path>` | Write the last frame to `<path>` as a PPM, so "does it draw" has an answer that is not a trace. |
+| `ARC_SHOT_EVERY=n` | With `ARC_SHOT`, write every `n`th frame instead, numbered `<path>.NNNN.ppm` -- a recording with no window chrome, no cursor, and the same frames every time. |
+| `ARC_TRACE_CALLS=<substr>` | Print the host calls the guest makes whose name contains `<substr>`; `*` for all of them. |
+| `ARC_TRACE_MSG=<substr>` | The same for Objective-C messages, matched on the selector, with the argument registers and what came back. |
+| `ARC_TRACE_STACK=<words>` | Print that many words of the caller's frame alongside each traced message -- the arrays and counts a loop is working from, still addressable at the moment a bad value is passed. |
+| `ARC_TRACE_DRAW` | Print the GL draw calls. |
+| `ARC_TRACE_TEX` | Print texture uploads and the glyphs rasterised into them. |
 
 Triage a new title before committing to it:
 
@@ -176,7 +215,7 @@ Three iOS 3.x games, probed with the tools in this repo:
 | **Thumb** | **0%** | 21% | — |
 | undefined symbols | 205 | 354 | 487 |
 | frameworks | 14 | 14 | — |
-| ObjC classes / selrefs | — | 38 / 866 | — |
+| ObjC classes / selrefs | 49 / 506 | 38 / 866 | — |
 
 Canabalt being 100% ARM is why it was picked as the first port: the emitter can
 be built and validated with no interworking at all, and 626 functions is small
@@ -292,13 +331,45 @@ enough to lift in full and check against an emulator.
             now, 159 forms became 191, and putting the bug back makes the
             harness report it. Found by reading `-[MenuState init]` in the
             published source, which is why this game was chosen.
-      - [ ] The run now stops further along.
+      - [x] Pixels, finally. Four things stood between correct draw calls and
+            a visible menu, and only one of them was a missing shim: a view
+            answered with the *window's* frame instead of its own, so a
+            128x32 text view put its pen at x=132 and every glyph fell
+            outside its texture; two shim tables both claimed
+            `+[UIImage imageNamed:]` and the nil one won, so no image in the
+            game ever loaded; and a `HostMethod` collision is reported by
+            name now rather than resolved by table order.
+      - [x] The frame the right way up. The guest keeps the portrait
+            framebuffer a device gives it -- so its own transform chain is
+            untouched, and the quarter turn it does is the one the hardware
+            asked for. The turn back happens in clip space, where it is one
+            rotation and no copy: the projection becomes R(90) . Ortho.
+            Rendering to a texture and blitting it rotated needs a
+            framebuffer object and two passes to do the same thing.
+      - [x] Touch, and it drives. A mouse is one finger; UIKit hands it to
+            the view as an `NSSet` of `UITouch`, and the binary asks a touch
+            for exactly one thing -- `locationInView:` -- because which of
+            the three methods was called says the phase already. Five things
+            were needed along the way, each named by the run that stopped on
+            it: NSSet and NSMutableSet, `-performSelector:withObject:
+            afterDelay:` queued and drained by the frame loop, colours with
+            real components, a boxed pointer that keys on what it boxes, and
+            a `+initialize` guard that survives nesting.
+      - [x] The context transform is real. ABOUT was drawn as HDOUC -- the
+            right glyphs with their tops cut off, because the game lays text
+            out top-down through `translate; translate; scale(1, -1)` and the
+            bitmap context ignored all three. It carries a transform now, and
+            the glyph trace prints characters rather than indices, because a
+            log full of `CGGlyph` numbers cannot tell "illegible" from "the
+            wrong word".
+      - [ ] The run now stops further along: building `PlayState`'s sprites.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite
-      construction, the high-score store and the menu's buttons, and into text
-      layout -- **113 imports answered, 34 to go**. It prints its own
-      diagnostics along the way, because `NSLog` works:
+      construction, the high-score store, the menu's buttons and its text
+      layout, into a frame loop that draws -- **115 imports claimed, 32 still
+      owed**, and a tap on a button runs that button's action. It prints its
+      own diagnostics along the way, because `NSLog` works:
 
       ```
       [guest] check for other audio!
@@ -308,7 +379,15 @@ enough to lift in full and check against an emulator.
 
       Those audio errors are the shim being honest rather than plausible, and
       the game taking the path it has for a device with no sound available.
-- [ ] **M9 — a window.**
+- [x] **M9 — a window.** 480x320, a compatibility GL context, a frame loop
+      standing in for `CADisplayLink` and `NSRunLoop`, and a run that can
+      record itself: `ARC_TAP` scripts the taps, `ARC_SHOT_EVERY` writes the
+      frames, and `ARC_MAX_FRAMES` bounds a loop that otherwise never returns.
+      At 300 frames the menu is complete and the frame is 100% not black.
+- [ ] **M10 — the game itself.** PLAY reaches `PlayState` and faults building
+      its sprites. From here the remaining work is gameplay rather than
+      launch: the sprite and tilemap paths, audio that actually plays, and
+      whatever the 32 outstanding imports turn out to be.
 
 ## Ports
 

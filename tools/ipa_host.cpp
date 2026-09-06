@@ -29,12 +29,20 @@ namespace {
 
 void Usage() {
   std::puts(
-      "usage: ipa_host [--arch armv6|armv7] [--contract=file] <path/to/binary>\n"
+      "usage: ipa_host [options] <path/to/binary>\n"
       "\n"
-      "  --arch      which slice to load; default is the newest ARM slice\n"
-      "  --contract  a file of entry points the host must drive, one per line;\n"
-      "              with none, every Objective-C class in the binary is listed,\n"
-      "              which is how you discover a title's contract.");
+      "  --arch        which slice to load; default is the newest ARM slice\n"
+      "  --contract=f  a file of entry points the host must drive, one per\n"
+      "                line; with none, every Objective-C class in the binary\n"
+      "                is listed, which is how you discover a title's contract\n"
+      "  --objc        realize the class table and report it\n"
+      "  --run         start the guest and stop at the first missing piece\n"
+      "  --permissive  answer an unimplemented message with nil and an\n"
+      "                unimplemented import with zero, listing both, so one\n"
+      "                run names the whole contract\n"
+      "  --bundle=d    the .app directory resources are loaded from\n"
+      "\n"
+      "Runtime knobs are environment variables; see README.md.");
 }
 
 // The generated program installs its own dispatch table, and this tool is

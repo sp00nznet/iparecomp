@@ -585,8 +585,6 @@ const Entry kEntries[] = {
     {"NSRunLoop", true, "mainRunLoop", CurrentRunLoop},
     {"NSRunLoop", false, "run", RunFrameLoop},
 
-    {"NSNotificationCenter", true, "defaultCenter", NilMethod},
-    {"NSValue", true, "valueWithPointer:", NilMethod},
 };
 
 }  // namespace
