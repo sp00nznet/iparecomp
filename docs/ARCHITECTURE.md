@@ -735,9 +735,41 @@ moment the bad value is passed. On this bug it shows an array of four valid
 string pointers at `sp+0x120`, and the bad value appearing nowhere in the frame
 except the outgoing argument slots.
 
-Which means the value is not sitting in the frame waiting to be read: it is
-produced between the load and the call. That is the next thing to look at, and
-it is a much smaller window than "somewhere in text layout" was.
+`arc_guest_find` closes the loop from the other end: at the trap it scans
+everything the guest owns for the offending value and reports where else it
+lives. That is the question a register cannot answer -- a register says what
+was *used*, and only the memory says what produced it.
+
+On this bug the answer was: the guest stack, in and just below the outgoing
+argument area, and **nowhere in the heap at all**. So it was never an element
+of an allocated array of strings, which is what the read that produced it
+looked like.
+
+### Where this one stands, and the honest way to finish it
+
+The remaining chain of facts is narrow and consistent:
+
+- `-[MenuState init]` loads it with `ldr r5, [r3, r6, lsl #2]` at `0xace4`,
+  with `r6 == 2` -- the third time round a loop.
+- `r5` is already wrong at the very next message, so the load produced it
+  rather than a callee clobbering a callee-saved register.
+- It is returned by no message, passed by no earlier message, and is not a
+  constant anywhere in the image.
+- It exists only on the stack, and only where it was subsequently copied.
+
+Four hypotheses have been tested and eliminated: the lifter (the whole chain is
+now differentially verified), the stret calling convention (guarded, does not
+fire), a missing `.strings` table (the bundle's only one belongs to the
+Settings bundle), and a heap array read out of bounds (the value is not in the
+heap).
+
+The efficient way to finish it is not more tracing. Canabalt was chosen as the
+first target *because its source is public* -- that is the whole argument in
+[Calibrating the emitter](#calibrating-the-emitter) -- and `-[MenuState init]`
+can simply be read. What the array is, what fills it, and what bounds the loop
+are all facts in that source rather than things to infer from a disassembly.
+Reaching for the ground truth is the point of having picked this game, and four
+turns of inference is exactly the situation it was meant to avoid.
 
 ## The shim surface
 

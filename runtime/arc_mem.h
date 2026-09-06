@@ -52,6 +52,12 @@ void arc_set_image_range(uint32_t lo, uint32_t hi);
 // faulting later on whatever it happens to point at.
 int arc_guest_plausible(uint32_t addr);
 
+// Every place a word appears in memory the guest owns, up to `limit`
+// addresses. When a bad value turns up in a register, the question is always
+// where it was read from, and this is the only way to answer it without
+// knowing which register held the pointer: look for the value itself.
+size_t arc_guest_find(uint32_t value, uint32_t* out, size_t limit);
+
 // How much of the heap has been handed out, for the report on the way down.
 uint32_t arc_guest_used(void);
 uint32_t arc_guest_capacity(void);

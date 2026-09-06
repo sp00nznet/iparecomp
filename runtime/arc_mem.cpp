@@ -134,5 +134,23 @@ int arc_guest_plausible(uint32_t addr) {
   return arc_guest_owns(addr, 1);
 }
 
+size_t arc_guest_find(uint32_t value, uint32_t* out, size_t limit) {
+  size_t found = 0;
+  // Only what has actually been handed out, and the stack. Scanning reserved
+  // but uncommitted address space would fault, which would be an unhelpful way
+  // to answer a question about a fault.
+  const struct {
+    uint32_t lo, hi;
+  } spans[] = {{kHeapBase, g_next}, {kStackBase, kStackBase + kStackSize}};
+  for (const auto& s : spans) {
+    for (uint32_t at = s.lo; at + 4 <= s.hi && found < limit; at += 4) {
+      uint32_t word;
+      memcpy(&word, reinterpret_cast<const void*>(uintptr_t(at)), 4);
+      if (word == value && out) out[found++] = at;
+    }
+  }
+  return found;
+}
+
 uint32_t arc_guest_used(void) { return g_next - kHeapBase; }
 uint32_t arc_guest_capacity(void) { return kHeapSize; }

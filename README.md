@@ -287,10 +287,13 @@ enough to lift in full and check against an emulator.
             constant in the image. It is uninitialised memory --
             `-[MenuState init]` reads a menu-label array whose third slot was
             never written, with a loop bound that came from a message return.
-            `ARC_TRACE_STACK` then showed the caller's whole frame at the
-            moment of the bad call: four valid string pointers at `sp+0x120`,
-            and the bad value present nowhere in the frame except the outgoing
-            arguments -- so it is produced between the load and the call.
+            `ARC_TRACE_STACK` showed the caller's whole frame, and
+            `arc_guest_find` showed the value exists only on the stack and
+            nowhere in the heap. Four hypotheses are eliminated -- the lifter,
+            the stret convention, a missing `.strings` table, and a heap array
+            read out of bounds. The efficient way to finish it is to read
+            `-[MenuState init]` in the published source, which is the reason
+            this game was picked.
 
       Canabalt now runs from `_start` through the whole launch, the audio
       load loop, the GL view and framebuffer setup, texture loading, sprite

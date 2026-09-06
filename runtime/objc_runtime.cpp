@@ -346,6 +346,16 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
   // nothing to say which send was at fault. Refusing here names the selector
   // and leaves the frame ring pointing at the function that passed it.
   if (!arc_guest_plausible(receiver)) {
+    // Where else does this value live? A register says what was used; the
+    // memory it came from says what produced it, and the address of the slot
+    // is usually enough to name the structure.
+    uint32_t at[8];
+    const size_t n = arc_guest_find(receiver, at, 8);
+    if (n) {
+      std::printf("\n%#x also appears in guest memory at:", receiver);
+      for (size_t i = 0; i < n; ++i) std::printf(" %#x", at[i]);
+      std::printf("\n");
+    }
     char msg[192];
     std::snprintf(msg, sizeof msg,
                   "objc_msgSend: %#x is not an object, and it was sent %s",
@@ -396,8 +406,13 @@ void Send(Arm32Ctx* c, uint32_t receiver, uint32_t cls, uint32_t sel) {
       const ObjcClass* k = g_objc.ClassAt(cls);
       const char* cn = k ? k->name.c_str() : HostClassName(cls);
       const uint32_t sp = ARC_SP(c);
-      std::printf("[msg] %s[%s %s] r2=%#x r3=%#x sp0=%#x sp1=%#x sp2=%#x\n",
+      // r4-r7 as well: they are callee-saved, so watching them across a
+      // sequence of messages is how a clobber is told apart from a value that
+      // was already wrong when it was loaded.
+      std::printf("[msg] %s[%s %s] r4=%08x r5=%08x r6=%08x r7=%08x | "
+                  "r2=%#x r3=%#x sp0=%#x sp1=%#x sp2=%#x\n",
                   k && k->meta ? "+" : "-", cn ? cn : "?", name,
+                  ARC_R(c, 4), ARC_R(c, 5), ARC_R(c, 6), ARC_R(c, 7),
                   ARC_R(c, 2), ARC_R(c, 3),
                   arc_guest_owns(sp, 4) ? ARC_LD32(sp) : 0,
                   arc_guest_owns(sp + 4, 4) ? ARC_LD32(sp + 4) : 0,
