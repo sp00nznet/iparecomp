@@ -3,8 +3,8 @@
 
 There is no decoder here, on purpose. Capstone already decodes armv6, armv7 and
 Thumb-2, and writing another one to check against it would be building a worse
-capstone. androidrecomp's lifter emits straight from capstone's operand detail
-and this does the same. What is new on 32-bit ARM is everything *after* the
+capstone. This lifter emits straight from capstone's operand detail
+instead. What is new on 32-bit ARM is everything *after* the
 decode: a condition code on every instruction, a barrel shifter with its own
 carry, a PC that is a general register, and functions that end in `pop {pc}`.
 

@@ -2,7 +2,7 @@
 // emits. This header is the emitter's target: everything tools/lifter.py
 // generates is a call into, or a macro from, this file.
 //
-// As in androidrecomp, there is no address translation. The loader maps the
+// There is no address translation. The loader maps the
 // image at a real host address and the shim hands the guest the host's own
 // malloc, so a guest load is a host dereference. What is *not* position
 // independent is any address the instruction stream computes from the PC, and
@@ -204,8 +204,7 @@ static inline ArcShift arc_rrx(uint32_t v, uint32_t cin) {
 #define ARC_DU(c, n) ((c)->v.u64[(n)])
 
 // Three places C and the hardware disagree, each producing a plausible wrong
-// number rather than a crash. Inherited from androidrecomp, which found all
-// three the expensive way.
+// number rather than a crash. All three were found the expensive way.
 //
 // 1. An invalid operation -- 0/0, inf - inf, 0 * inf -- yields a NaN whose
 //    sign bit x86 sets and ARM clears. It affects all four basic operations,

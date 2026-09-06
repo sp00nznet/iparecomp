@@ -15,6 +15,11 @@ reports **115 imports claimed and 32 still owed**, and tapping PLAY builds
 `PlayState` and faults there, which is where the work is.
 See [Milestones](#milestones).
 
+### Recent changes
+
+**Current version: v0.1.0 — _"First Light"_ (September 2026).**
+See the [Changelog](#changelog) for what landed and when.
+
 ---
 
 ## What this is
@@ -24,11 +29,9 @@ Store first opened — produced a large catalogue of games that runs on nothing
 today. The binaries are 32-bit ARM Mach-O, armv6 or armv7, and no current
 device executes that natively. Apple dropped 32-bit support entirely in iOS 11.
 
-That catalogue is the target. Same philosophy as
-[androidrecomp](https://github.com/sp00nznet/androidrecomp), aimed at the other
-platform: replace the host, satisfy the import surface, lift the machine code
-to C, and get an ordinary native executable out — no emulator, no jailbreak, no
-device.
+That catalogue is the target, by static recompilation: replace the host,
+satisfy the import surface, lift the machine code to C, and get an ordinary
+native executable out — no emulator, no jailbreak, no device.
 
 **This repository is deliberately app-agnostic.** A port supplies its own
 bundle contract and links the library here. Nothing title-specific belongs in
@@ -80,9 +83,9 @@ runtime while the C/C++ half is compiled, which is what makes a game with a
 few dozen classes and a few hundred selectors a far smaller job than its
 framework list suggests.
 
-There is also no easy path: androidrecomp gets to run its target natively on an
-arm64 host and debug the shim before any lifting exists. Nothing runs armv6, so
-iparecomp is a lifting project from day one.
+There is also no easy path. An arm64 target can be run natively on an arm64
+host, so its shim can be brought up and debugged before any lifting exists at
+all. Nothing runs armv6, so iparecomp is a lifting project from day one.
 
 ## What you get
 
@@ -223,171 +226,84 @@ enough to lift in full and check against an emulator.
 
 ## Milestones
 
+The reasoning behind each of these is in
+[ARCHITECTURE.md](docs/ARCHITECTURE.md); this is the state.
+
 - [x] **M0 — triage.** `ipa_probe.py`: encryption gate, slice selection,
       per-function ARM/Thumb disassembly, coverage, ObjC weight.
 - [x] **M1 — loader.** Fat and thin Mach-O parsed, segments mapped, slide
-      recorded, imports resolved to owing frameworks.
+      recorded, imports resolved to the framework that owes each one.
 - [x] **M2 — the emitter's target.** `arm32_context.h`, with the shifter and
       flag semantics checked against hardware behaviour.
-- [x] ~~**M3 — decoder.**~~ **Dropped, deliberately.** This called for a
-      decoder for armv6/armv7 and Thumb-2, verified against capstone. But
-      capstone already decodes all three, so the milestone amounted to building
-      a worse capstone and then testing it against the real one. `lifter.py`
-      emits straight from capstone's operand detail, which is what
-      androidrecomp's lifter does and what freed the effort for the emitter.
-- [x] **M4 — emitter.** 626 of 626 functions, 41,167 of 41,167 instructions.
-      Condition codes as predicates, PC reads folded to constants at lift time,
-      `ldm`/`pop` writing PC recognised as return or indirect branch, and the
-      whole VFP surface these binaries use. The output compiles clean at
-      `-Wall`.
-- [x] **M5 — differential test.** Per instruction: 23,111 cases over 191
-      operand forms, 100% agreement with Unicorn on registers, flags, the
-      vector file and memory. The form count went up and the case count went
-      down when the *addressing mode* became part of a form's identity, which
-      is the whole lesson: a form that is never sampled is not tested however
-      many cases run.
-
-      Whole functions **with calls** too, which is most of them: **619 of
-      626**, by neutralising the imports identically on both sides -- reaching
-      one sets r0 to zero and returns, on the lifted side through a registered
-      native and in the oracle through a code hook. What the callee would have
-      done does not matter; that the two sides do the same thing does.
-
-      Allowing only calls whose whole tree is lifted added nothing, because
-      every non-leaf function in an Objective-C binary sends a message and
-      `objc_msgSend` is an import.
+- [x] ~~**M3 — decoder.**~~ **Dropped, deliberately.** Capstone already decodes
+      armv6, armv7 and Thumb-2, so this milestone amounted to building a worse
+      capstone and then testing it against the real one. `lifter.py` emits from
+      capstone's operand detail instead, which freed the whole effort for the
+      emitter.
+- [x] **M4 — emitter.** 626 of 626 functions, 41,167 of 41,167 instructions,
+      compiling clean at `-Wall`. Condition codes as predicates, PC reads
+      folded to constants at lift time, `ldm`/`pop` writing PC recognised as
+      return or indirect branch, and the whole VFP surface these binaries use.
+- [x] **M5 — differential test.** 23,111 per-instruction cases over 191 operand
+      forms, and **619 of 626 whole functions** -- including every one that
+      calls another, by neutralising the imports identically on both sides.
+      100% agreement with Unicorn on registers, flags, the vector file and
+      memory. The form count is the whole lesson, and it is worth reading why:
+      [a shape that is never sampled is not tested](docs/ARCHITECTURE.md#why-62421-agreeing-cases-did-not-catch-it),
+      however many cases run.
 - [x] **M6 — the slide.** These binaries are non-PIE with an empty rebase
       table, so nothing records which words are pointers and the image cannot
-      be slid at all -- but its link address is below the 64 KB floor every
-      desktop OS enforces. Solved exactly, with no heuristic: the lifter folds
-      all 5,852 literal-pool loads into constants, which leaves `__TEXT,__text`
-      -- the only section below the floor -- with no run-time reader at all.
-      The loader then maps every segment at its link address from `0x10000` up,
-      the slide is zero, and the unmappable first 64 KB serves as the guard
-      page. See
+      be slid at all -- but its link address sits below the 64 KB floor every
+      desktop OS enforces. Solved exactly, with no heuristic: folding all 5,852
+      literal-pool loads into constants leaves nothing reading `__TEXT,__text`,
+      so every segment maps at its link address and the slide is zero. See
       [The slide has to be zero](docs/ARCHITECTURE.md#the-slide-has-to-be-zero).
 - [x] **M7 — ObjC runtime.** 49 classes and their metaclasses realized from
-      `__objc_classlist`, categories merged, and the superclass chain named
-      even where it leaves the binary -- a class inheriting `NSObject` has a
-      zero superclass field and a bind entry saying so, so the bind opcodes are
-      read too. `objc_msgSend`, `objc_msgSendSuper2` and `objc_msgSend_stret`
-      are registered at their import stubs, so lifted code that sends a message
-      dispatches into other lifted code. Checked two ways: the realized table
-      agrees with `objc_dump.py`, an independent reader, on all 49 classes and
-      518 method pairs; and 88/88 real messages sent through the stub, the
-      native table and the runtime arrive at the implementation the table
-      names.
-- [ ] **M8 — framework shims.** The scaffolding is in and the game runs on it;
-      the frameworks themselves are the remaining work.
-      - [x] A guest heap and stack below 4 GB, because a 32-bit guest cannot
-            hold a host `malloc` result -- `arc_mem`.
-      - [x] libSystem and libgcc: all 13 symbols Canabalt names.
-      - [x] Host classes with real class objects in guest memory, and the 220
-            framework class references dyld would have bound now bound to them.
-      - [x] `UIApplicationMain` far enough to reach the delegate, and NSObject's
-            `alloc`/`init`/`retain`/`release`/`isKindOfClass:`.
-      - [x] `--run` starts the guest and says where it stopped, with a
-            backtrace through lifted code and the trail of calls out.
-      - [x] `--permissive` answers an unimplemented framework message with nil
-            and an unimplemented import with zero, writing both down, so one
-            run enumerates the whole contract instead of one rebuild per
-            symbol.
-      - [x] Foundation enough to launch: NSString with a format implementation,
-            NSNumber, NSDictionary, NSUserDefaults, NSBundle, NSURL.
-      - [x] A category on a framework class answers from lifted code --
-            `+[UIColor(HexColor) colorWithHexRed:...]` is the game's own.
-      - [x] OpenGLES on desktop GL. Every entry point the game uses is also
-            OpenGL 1.1 under the same name, so the shims are calls rather than
-            a translation layer and `opengl32` resolves them with no loader.
-      - [x] An SDL window with a compatibility GL context, and a frame loop
-            standing in for CADisplayLink and NSRunLoop.
-      - [x] UIScreen, UIWindow, UIView with a real class hierarchy, EAGLContext,
-            CAEAGLLayer.
-      - [x] Audio answered honestly rather than plausibly: the session
-            succeeds, opening a file fails, and the game takes its own
-            no-sound path.
-      - [x] CoreGraphics geometry, written out exactly -- empty rectangles
-            compare equal, containment is half-open, an inset past the middle
-            is the null rect.
-      - [x] Images: the bundle's 73 PNGs decoded with libpng, the bitmap
-            context the game composes textures in, and the blit into it that
-            `glTexImage2D` then uploads.
-      - [x] `--bundle` so resources resolve, and a function budget so a guest
-            that never reaches the frame loop reports where it was going round
-            instead of hanging.
-      - [x] Fonts backed by FreeType, out of the bundle's own Nokia.ttf --
-            real advances and bounding boxes in font units, and glyphs
-            rasterised into the same bitmap context the game uploads.
-      - [x] NSArray and NSMutableArray for real, including fast enumeration,
-            because `for (x in array)` is everywhere and an array that stays
-            silently empty is a menu with no buttons in it.
-      - [x] Text layout: fixed, and it was a lifting bug --
-            `ldr r5, [r3, r6, lsl #2]` was emitted without the `lsl #2`, so
-            every array subscript in the binary read one byte into an element
-            instead of one element along. Capstone reports that scale in the
-            operand's `shift` and leaves `mem.lshift` zero. The harness missed
-            it because `form()` rendered every addressing mode as `[m]`, so a
-            scaled register index was never sampled; it is a distinct shape
-            now, 159 forms became 191, and putting the bug back makes the
-            harness report it. Found by reading `-[MenuState init]` in the
-            published source, which is why this game was chosen.
-      - [x] Pixels, finally. Four things stood between correct draw calls and
-            a visible menu, and only one of them was a missing shim: a view
-            answered with the *window's* frame instead of its own, so a
-            128x32 text view put its pen at x=132 and every glyph fell
-            outside its texture; two shim tables both claimed
-            `+[UIImage imageNamed:]` and the nil one won, so no image in the
-            game ever loaded; and a `HostMethod` collision is reported by
-            name now rather than resolved by table order.
-      - [x] The frame the right way up. The guest keeps the portrait
-            framebuffer a device gives it -- so its own transform chain is
-            untouched, and the quarter turn it does is the one the hardware
-            asked for. The turn back happens in clip space, where it is one
-            rotation and no copy: the projection becomes R(90) . Ortho.
-            Rendering to a texture and blitting it rotated needs a
-            framebuffer object and two passes to do the same thing.
-      - [x] Touch, and it drives. A mouse is one finger; UIKit hands it to
-            the view as an `NSSet` of `UITouch`, and the binary asks a touch
-            for exactly one thing -- `locationInView:` -- because which of
-            the three methods was called says the phase already. Five things
-            were needed along the way, each named by the run that stopped on
-            it: NSSet and NSMutableSet, `-performSelector:withObject:
-            afterDelay:` queued and drained by the frame loop, colours with
-            real components, a boxed pointer that keys on what it boxes, and
-            a `+initialize` guard that survives nesting.
-      - [x] The context transform is real. ABOUT was drawn as HDOUC -- the
-            right glyphs with their tops cut off, because the game lays text
-            out top-down through `translate; translate; scale(1, -1)` and the
-            bitmap context ignored all three. It carries a transform now, and
-            the glyph trace prints characters rather than indices, because a
-            log full of `CGGlyph` numbers cannot tell "illegible" from "the
-            wrong word".
-      - [ ] The run now stops further along: building `PlayState`'s sprites.
-
-      Canabalt now runs from `_start` through the whole launch, the audio
-      load loop, the GL view and framebuffer setup, texture loading, sprite
-      construction, the high-score store, the menu's buttons and its text
-      layout, into a frame loop that draws -- **115 imports claimed, 32 still
-      owed**, and a tap on a button runs that button's action. It prints its
-      own diagnostics along the way, because `NSLog` works:
-
-      ```
-      [guest] check for other audio!
-      [guest] is other audio playing: 0
-      [guest] Error opening file (bomb_explode.caf): 2003334207
-      ```
-
-      Those audio errors are the shim being honest rather than plausible, and
-      the game taking the path it has for a device with no sound available.
-- [x] **M9 — a window.** 480x320, a compatibility GL context, a frame loop
-      standing in for `CADisplayLink` and `NSRunLoop`, and a run that can
-      record itself: `ARC_TAP` scripts the taps, `ARC_SHOT_EVERY` writes the
-      frames, and `ARC_MAX_FRAMES` bounds a loop that otherwise never returns.
-      At 300 frames the menu is complete and the frame is 100% not black.
+      `__objc_classlist`, categories merged, and the superclass chain followed
+      even where it leaves the binary. `objc_msgSend`, `objc_msgSendSuper2` and
+      `objc_msgSend_stret` registered at their import stubs, so lifted code
+      that sends a message dispatches into other lifted code. Checked two ways:
+      against `objc_dump.py` on all 49 classes and 518 method pairs, and 88/88
+      real messages arriving at the implementation the table names.
+- [x] **M8 — framework shims.** The whole launch path, and each piece was named
+      by the run that stopped on it rather than guessed in advance: a guest
+      heap and stack below 4 GB, libSystem, framework classes as real class
+      objects in guest memory, Foundation, CoreGraphics geometry written out
+      exactly, OpenGLES on desktop GL, the bundle's PNGs through libpng, fonts
+      through FreeType, and audio that fails honestly rather than plausibly so
+      the game takes its own no-sound path. **115 imports claimed, 32 still
+      owed.**
+- [x] **M9 — a window.** 480x320 with a compatibility GL context, a frame loop
+      standing in for `CADisplayLink` and `NSRunLoop`, and the guest's portrait
+      framebuffer turned upright in clip space -- one matrix rather than a
+      second pass. At 300 frames the menu is complete and the frame is 100% not
+      black: the logo, the skyline, the billboard, and the ABOUT and PLAY
+      buttons, either of which runs its action when tapped.
 - [ ] **M10 — the game itself.** PLAY reaches `PlayState` and faults building
-      its sprites. From here the remaining work is gameplay rather than
-      launch: the sprite and tilemap paths, audio that actually plays, and
-      whatever the 32 outstanding imports turn out to be.
+      its sprites. From here the work is gameplay rather than launch: the
+      sprite and tilemap paths, audio that actually plays, and whatever the 32
+      outstanding imports turn out to be.
+
+## Changelog
+
+### v0.1.0 — _"First Light"_ (September 2026)
+
+First tagged version, cut at the point the toolkit stopped being a lifter and
+started being a host: a lifted armv6 game reaches its own frame loop and draws
+its menu, and a tap on a button runs that button's action.
+
+- **The emitter is done and checked.** 626 of 626 functions, 41,167 of 41,167
+  instructions, verified against Unicorn per instruction and per whole
+  function.
+- **The image loads where it has to.** Zero slide, no heuristic, no patched
+  host.
+- **The ObjC runtime answers `objc_msgSend`** out of the binary's own class
+  table, and lifted code dispatches into lifted code.
+- **115 of 147 imports answered**, across UIKit, Foundation, CoreGraphics,
+  OpenGLES, images, fonts and audio.
+- **A run can record itself** -- `ARC_TAP` scripts the taps and
+  `ARC_SHOT_EVERY` writes the frames, so a walk through the menus repeats
+  exactly.
 
 ## Ports
 

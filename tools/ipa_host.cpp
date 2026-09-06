@@ -11,7 +11,8 @@
 //
 // Nothing here can execute the image. These binaries are 32-bit ARM and no
 // modern host runs that natively, so iparecomp is a lifting project from the
-// first day -- there is no arm64-host shortcut of the kind androidrecomp gets.
+// first day -- there is no run-it-natively-first shortcut of the kind an
+// arm64 target allows.
 #include <algorithm>
 #include <csetjmp>
 #include <cstdio>

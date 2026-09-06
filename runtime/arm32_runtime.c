@@ -5,8 +5,8 @@
 // `arc_set_dispatch`. The layering rule is that anything the shim calls must
 // be defined in the library, and anything generated must plug in -- the shim
 // itself has to dispatch, because a guest entry point is a guest address.
-// androidrecomp learned this twice from opposite directions; inherited here
-// rather than rediscovered.
+// That rule has been learned twice from opposite directions, so it is written
+// down here rather than rediscovered.
 
 #include "arm32_context.h"
 

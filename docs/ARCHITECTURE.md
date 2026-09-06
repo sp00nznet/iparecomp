@@ -142,8 +142,8 @@ to build a worse capstone and then test it against the real one.
 
 `lifter.py` emits straight from capstone's operand detail -- registers, shift
 kinds and amounts, memory bases and displacements, the condition field, the
-write-back flag -- exactly as androidrecomp's lifter does. Everything genuinely
-new about 32-bit ARM is *after* the decode, and that is where the effort went.
+write-back flag. Everything genuinely new about 32-bit ARM is *after* the
+decode, and that is where the effort went.
 
 The one thing this costs is that capstone's own view has to be understood
 rather than assumed. `lsl r0, r1, r2` comes back as two operands with the shift
@@ -176,10 +176,9 @@ function. `--report` therefore ranks by functions broken, not by occurrences.
 
 ### One C function per guest function
 
-As in androidrecomp. Guest pointers are host
-pointers, so a guest load is a host dereference and there is no address
-translation layer. Beyond that, 32-bit ARM forces four decisions that ARM64
-never raised.
+Guest pointers are host pointers, so a guest load is a host dereference and
+there is no address translation layer. Beyond that, 32-bit ARM forces four
+decisions that ARM64 never raised.
 
 ### 1. Every instruction is conditional
 
@@ -337,12 +336,12 @@ all, and that is the contract.
 
 ## Verification
 
-The emitter is checked the way androidrecomp checks its own: differentially,
-against an independent oracle, on real harvested instructions rather than
-synthetic ones. Unicorn provides the oracle and needs no armv6 hardware, which
-is fortunate, because there is none. The independence is the whole point --
-checking the emitters against capstone would prove nothing, since capstone is
-where they get their operands.
+The emitter is checked differentially: against an independent oracle, on real
+harvested instructions rather than synthetic ones. Unicorn provides the oracle
+and needs no armv6 hardware, which is fortunate, because there is none. The
+independence is the whole point -- checking the emitter against capstone would
+prove nothing, since capstone is where it gets its operands in the first
+place.
 
 Per-instruction is done: 23,111 cases over 191 operand forms, comparing
 registers, flags, the vector file and memory, at 100% agreement. Whole
