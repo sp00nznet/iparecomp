@@ -144,18 +144,38 @@ class Lifter:
     def name(addr: int) -> str:
         return f"fn_{addr:08x}"
 
+    def strip_cc(self, ins) -> str:
+        """The mnemonic with only its condition suffix removed."""
+        m = ins.mnemonic.split(".")[0]
+        if ins.cc and ins.cc != ca.ARM_CC_AL:
+            for suffix in CC_SUFFIX[ins.cc]:
+                if m.endswith(suffix) and len(m) > len(suffix):
+                    return m[:-len(suffix)]
+        return m
+
+    def sets_flags(self, ins) -> bool:
+        """Whether this instruction *writes* the flags.
+
+        capstone reports `update_flags` for adc, sbc and rsc even when S is
+        clear, because those three *read* the carry -- so the field means
+        "touches CPSR", not "writes it". Trusting it makes `adc` clobber the
+        flags of the instruction after it, which is a silent wrong answer of
+        exactly the kind this emitter exists to avoid. For those three the
+        mnemonic is authoritative: only the S form carries the trailing `s`.
+        """
+        if not ins.update_flags:
+            return False
+        if self.root(ins) not in ("adc", "sbc", "rsc"):
+            return True
+        return self.strip_cc(ins).endswith("s")
+
     def root(self, ins) -> str:
         """The mnemonic with its condition and flag suffixes removed.
 
         One emitter then serves all sixteen predicated forms of an instruction
         rather than sixteen near-copies.
         """
-        m = ins.mnemonic.split(".")[0]
-        if ins.cc and ins.cc != ca.ARM_CC_AL:
-            for suffix in CC_SUFFIX[ins.cc]:
-                if m.endswith(suffix) and len(m) > len(suffix):
-                    m = m[:-len(suffix)]
-                    break
+        m = self.strip_cc(ins)
         # The trailing `s` is the flag suffix only where the architecture has
         # one. VFP does not, and `vmrs`/`mrs` end in an `s` that is part of the
         # name -- stripping it there invents a mnemonic no emitter answers to.
@@ -264,39 +284,42 @@ class Lifter:
         rd = self.dest(ins, ops[0])
         a = self.read(ins, self.reg(ins, ops[1].reg))
         b, carry = self.operand(ins, ops[2])
+        # adc/sbc/rsc take the carry as an *input*, and the flag helpers
+        # write c->cf as an output. Reading c->cf in the result expression
+        # after calling one of them reads the carry the instruction just
+        # produced instead of the one it was given -- wrong by exactly one,
+        # and only when S is set. Latch it first.
+        carry_in = op in ("adc", "sbc", "rsc")
+        latch = ", ci = c->cf" if carry_in else ""
         arith = {"add": ("+", "arc_add_flags(c, a, b, 0)"),
-                 "adc": ("+", "arc_add_flags(c, a, b, c->cf)"),
+                 "adc": ("+", "arc_add_flags(c, a, b, ci)"),
                  "sub": ("-", "arc_sub_flags(c, a, b, 1)"),
-                 "sbc": ("-", "arc_sub_flags(c, a, b, c->cf)")}
+                 "sbc": ("-", "arc_sub_flags(c, a, b, ci)")}
         logic = {"and": "&", "orr": "|", "eor": "^"}
         if op in ("rsb", "rsc"):
             a, b = b, a
             flags = "arc_sub_flags(c, a, b, 1)" if op == "rsb" \
-                else "arc_sub_flags(c, a, b, c->cf)"
-            expr, adjust = "a - b", ""
-            if op == "rsc":
-                expr = "a - b - (1u - c->cf)"
-            else:
-                expr = "a - b"
-            body = f"uint32_t a = {a}, b = {b}; "
-            if ins.update_flags:
+                else "arc_sub_flags(c, a, b, ci)"
+            expr = "a - b - (1u - ci)" if op == "rsc" else "a - b"
+            body = f"uint32_t a = {a}, b = {b}{latch}; "
+            if self.sets_flags(ins):
                 body += f"{flags}; "
             return "{ " + body + self.write(rd, expr) + " }"
         if op in arith:
             sign, flags = arith[op]
             expr = f"a {sign} b"
             if op == "adc":
-                expr = "a + b + c->cf"
+                expr = "a + b + ci"
             elif op == "sbc":
-                expr = "a - b - (1u - c->cf)"
-            body = f"uint32_t a = {a}, b = {b}; "
-            if ins.update_flags:
+                expr = "a - b - (1u - ci)"
+            body = f"uint32_t a = {a}, b = {b}{latch}; "
+            if self.sets_flags(ins):
                 body += f"{flags}; "
             return "{ " + body + self.write(rd, expr) + " }"
         if op in logic or op == "bic":
             expr = f"a {logic[op]} b" if op in logic else "a & ~b"
             body = f"uint32_t a = {a}, b = {b}, r = {expr}; "
-            if ins.update_flags:
+            if self.sets_flags(ins):
                 body += "ARC_NZ(c, r); "
                 if carry is not None:
                     body += f"c->cf = {carry}; "
@@ -311,7 +334,7 @@ class Lifter:
         v, carry = self.operand(ins, ops[1])
         expr = "r" if op == "mov" else "r"
         body = f"uint32_t r = {'' if op == 'mov' else '~'}({v}); "
-        if ins.update_flags:
+        if self.sets_flags(ins):
             body += "ARC_NZ(c, r); "
             if carry is not None:
                 body += f"c->cf = {carry}; "
@@ -344,7 +367,7 @@ class Lifter:
             # knows how to read it.
             value, carry = self.shifted(ins, ops[1])
             body = f"uint32_t r = {value}; "
-            if ins.update_flags:
+            if self.sets_flags(ins):
                 body += "ARC_NZ(c, r); "
                 if carry is not None:
                     body += f"c->cf = {carry}; "
@@ -363,7 +386,7 @@ class Lifter:
                 amount = f"({self.read(ins, self.reg(ins, ops[2].reg))} & 0xFFu)"
             call = f"arc_{op}({src}, {amount}, c->cf)"
         body = f"ArcShift s = {call}; "
-        if ins.update_flags:
+        if self.sets_flags(ins):
             body += "ARC_NZ(c, s.value); c->cf = s.carry; "
         return "{ " + body + self.write(rd, "s.value") + " }"
 
@@ -380,7 +403,7 @@ class Lifter:
             else:
                 raise Unsupported(form(ins))
             body = f"uint32_t r = {expr}; "
-            if ins.update_flags:
+            if self.sets_flags(ins):
                 body += "ARC_NZ(c, r); "
             return "{ " + body + self.write(r[0], "r") + " }"
         if op in ("umull", "smull", "umlal", "smlal") and len(r) == 4:
@@ -394,7 +417,7 @@ class Lifter:
             if op.endswith("lal"):
                 body += (f"w += ((uint64_t)ARC_R(c, {hi}) << 32) | "
                          f"ARC_R(c, {lo}); ")
-            if ins.update_flags:
+            if self.sets_flags(ins):
                 body += "c->nf = (uint32_t)(w >> 63); c->zf = (w == 0); "
             body += f"ARC_W(c, {lo}, (uint32_t)w); ARC_W(c, {hi}, (uint32_t)(w >> 32)); "
             return "{ " + body + "}"

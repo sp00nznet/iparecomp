@@ -400,7 +400,7 @@ def run_oracle(case: Case, regs, flags, vec, fpscr, scratch, image, image_size):
 LINK_BASE = 0
 
 
-def main() -> None:
+def main() -> int:
     global LINK_BASE
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("binary")
@@ -437,14 +437,26 @@ def main() -> None:
     image_size = align_up(IMAGE_BASE + len(image_full)) - IMAGE_BASE
     image_full = image_full.ljust(image_size, b"\0")
 
+    return verify(cases, image_full, image_size,
+                  args.seeds, args.seed, args.keep)
+
+
+def verify(cases: list[Case], image_full: bytes, image_size: int,
+           seeds: int, seed_value: int, keep: bool = False) -> int:
+    """Run every case on both sides and report. Returns the disagreement count.
+
+    Everything above this is about *finding* instructions to test -- harvested
+    from a real binary, or written down by hand in tools/conformance.py. This
+    is the part that does not care where they came from.
+    """
     workdir = tempfile.mkdtemp(prefix="arcverify-")
-    trials = [(c, s) for c in cases for s in range(args.seeds)]
+    trials = [(c, s) for c in cases for s in range(seeds)]
     exe = build_driver([c for c, _ in trials], image_full, workdir)
 
     size_out = subprocess.run([exe, "--size"], capture_output=True, text=True)
     ctx_size = int(size_out.stdout.strip())
 
-    rng = random.Random(args.seed)
+    rng = random.Random(seed_value)
     states, expected, live = [], [], []
     for case, s in trials:
         st = seed(rng, pointerish=(s % 3 != 0))
@@ -515,10 +527,12 @@ def main() -> None:
             text, why = examples[form_key]
             print(f"  {form_key:<26} {n:>4}  {text}")
             print(f"  {'':<26}       {why}")
-        sys.exit(1)
-    if args.keep:
+    if keep:
         print(f"work dir: {workdir}")
+    return sum(bad.values())
+
+
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() and 1)

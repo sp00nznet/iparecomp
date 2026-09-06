@@ -15,10 +15,18 @@ reports **115 imports claimed and 32 still owed**, and tapping PLAY builds
 `PlayState` and faults there, which is where the work is.
 See [Milestones](#milestones).
 
+**[Join the sp00nznet recomp Discord](https://discord.gg/CRpzGWZFcu)** — the
+community hub for sp00nznet's recomp projects. Good place to ask questions,
+show a port you are working on, or find out what people are stuck on before you
+duplicate the effort.
+
 ### Recent changes
 
-**Current version: v0.1.0 — _"First Light"_ (September 2026).**
+**Current version: v0.2.0 — _"Conformance"_ (September 2026).**
 See the [Changelog](#changelog) for what landed and when.
+
+**New here?** [Getting started](docs/GETTING-STARTED.md) walks an `.ipa` all
+the way to a window with the game drawing in it, one command at a time.
 
 ---
 
@@ -106,6 +114,7 @@ all. Nothing runs armv6, so iparecomp is a lifting project from day one.
 | `runtime/shim_*` | The framework surface itself, one file per area: UIKit, Foundation and the ObjC object graph, CoreGraphics, OpenGLES, images, fonts, audio, libSystem. Each is a table of selectors and C symbols, so what is answered and what is not is a list you can read. |
 | `runtime/window` | An SDL window with a compatibility GL context, the frame loop that stands in for `CADisplayLink` and `NSRunLoop`, the quarter turn from the guest's portrait framebuffer to a landscape window, and frame capture. |
 | `tools/objc_dump.py` | Reads the Objective-C class table straight out of `__DATA` -- classes, methods, selectors, and each method's implementation address. An iOS host contract is a set of classes, and this is how you discover one. |
+| `tools/conformance.py` | The emitter conformance suite: fixed encodings, **no `.ipa` required**, chosen to pin the semantics 32-bit ARM gets wrong quietly. The only check in this repo that runs on a clean checkout. |
 | `tools/arc_selftest.c` | Checks the shifter carry and the flag helpers against real ARM semantics. The bugs it catches are silent ones. |
 
 ## Building
@@ -145,16 +154,18 @@ Run it, and see where it stops:
 ```
 
 `--bundle` is what makes `pathForResource:ofType:` resolve, so a game only
-loads its own art and fonts with it. Note that PNGs inside a shipped `.ipa` are
-usually Apple's CgBI variant -- a private chunk and byte-swapped, premultiplied
-channels -- and libpng refuses them outright:
+loads its own art and fonts with it. Some of the PNGs in a shipped `.ipa` are
+Apple's CgBI variant -- a private chunk and byte-swapped, premultiplied
+channels -- and libpng refuses those with
 
 ```
 libpng error: CgBI: unhandled critical chunk
 ```
 
-There is no de-cruncher here. Convert the bundle's PNGs back to standard ones
-first, with any of the tools that do it, and point `--bundle` at that copy.
+It is a minority, and which files it hits decides whether it matters: 7 of
+Canabalt's 73, all of them gameplay art, so the menu loads and draws from a
+stock `.ipa` untouched. There is no de-cruncher here yet. Until there is, a
+title that keeps its menu art in a CgBI file needs those converted first.
 
 ### Driving a run without a person at the keyboard
 
@@ -285,6 +296,29 @@ The reasoning behind each of these is in
       outstanding imports turn out to be.
 
 ## Changelog
+
+### v0.2.0 — _"Conformance"_ (September 2026)
+
+A suite that runs without a game, and the two emitter bugs it found on its
+first run.
+
+- **`tools/conformance.py`** — 45 hand-written encodings through the same
+  differential harness `lift_verify.py` uses, so a pass means the same thing.
+  Every other check in this repository needs a binary you supplied; this one
+  runs on a clean checkout, which is what makes an emitter change reviewable
+  by someone who does not own a suitable game.
+- **`adcs`/`sbcs`/`rscs` used the wrong carry.** The flag helper *writes*
+  `c->cf`, and the result expression read it back afterwards — so the sum used
+  the carry the instruction had just produced instead of the one it was given.
+  Wrong by exactly one, and only with `S` set.
+- **`adc`/`sbc`/`rsc` clobbered the flags** with `S` clear. capstone reports
+  `update_flags` for those three because they *read* the carry, so the field
+  means "touches CPSR" rather than "writes it", and the emitter believed it.
+- Neither bug was reachable from the existing tests: **Canabalt contains no
+  `adc`, `sbc` or `rsc` at all**, so no amount of harvesting from that binary
+  would ever have sampled them. That is the argument for the suite.
+- [Getting started](docs/GETTING-STARTED.md) — an `.ipa` to a drawing window,
+  one command at a time.
 
 ### v0.1.0 — _"First Light"_ (September 2026)
 
