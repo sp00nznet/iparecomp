@@ -833,6 +833,10 @@ class Lifter:
         # product, which is the opposite of what the name suggests: it is
         # -Sd + Sn*Sm, not -(Sd + Sn*Sm).
         product = f"arc_mul{ty}({a}, {b})"
+        # VNMUL is the plain one of the negated family: the product itself,
+        # negated. It is not an accumulate and does not read the destination.
+        if op == "vnmul":
+            return f"{d} = -{product};"
         if op == "vmla":
             return f"{d} = arc_add{ty}({d}, {product});"
         if op == "vmls":
@@ -967,7 +971,8 @@ class Lifter:
             body = self._vldst(ins, op)
         elif op in ("vpush", "vpop"):
             body = self._vblock(ins, op)
-        elif op in ("vadd", "vsub", "vmul", "vdiv", "vmla", "vmls", "vnmla",
+        elif op in ("vadd", "vsub", "vmul", "vdiv", "vnmul", "vmla", "vmls",
+                    "vnmla",
                     "vnmls", "vneg", "vabs", "vsqrt"):
             body = self._vfp_arith(ins, op)
         elif op in ("vcmp", "vcmpe"):

@@ -22,7 +22,7 @@ duplicate the effort.
 
 ### Recent changes
 
-**Current version: v0.4.0 — _"Playable"_ (September 2026).**
+**Current version: v0.5.0 — _"Sound and Sprites"_ (September 2026).**
 See the [Changelog](#changelog) for what landed and when.
 
 **New here?** [Getting started](docs/GETTING-STARTED.md) walks an `.ipa` all
@@ -333,12 +333,46 @@ The reasoning behind each of these is in
       instructions unlifted. Tables are resolved at lift time now, from
       read-only `__TEXT` on an unslid image, with the bound taken from the
       guest's own `cmp`.
-- [ ] **M11 — the rest of it.** Audio that actually plays, the 32 imports
-      still owed, the 7 CgBI-crushed PNGs that libpng refuses (`block`,
-      `slope`, `hud`, `gameover` -- the gameplay set), and Thumb-2 for the
-      titles that are not this one.
+- [x] **M11 — sound and sprites.** Audio plays through AudioFile* and OpenAL
+      over SDL2, reached by way of `alBufferDataStatic` -- an extension with no
+      import of its own, fetched through `alcGetProcAddress`. The seven
+      CgBI-crushed PNGs decode, so the gameplay art and the distance counter
+      are on screen. The imports still owed are named rather than counted,
+      which found `_CGAffineTransformIdentity` being answered with zeroes.
+- [ ] **M12 — a second title.** *Angry Birds Rio* lifts **3,623 of 3,633
+      functions (99.7%)** at 21% Thumb, so interworking works; six forms block
+      the last ten. The host contract is the rest of the job: 359 undefined
+      symbols against Canabalt's 205, and 38 classes against 49.
 
 ## Changelog
+
+### v0.5.0 — _"Sound and Sprites"_ (September 2026)
+
+The game makes noise, the gameplay art loads, and a second title lifts almost
+completely.
+
+- **Audio plays.** 29 of Canabalt's 30 sound files, through AudioFile* and
+  OpenAL-over-SDL2. The piece that makes it work has no import of its own:
+  `alBufferDataStatic` is an Apple extension fetched through
+  `alcGetProcAddress`, which is the entire reason that function is in a game's
+  import list.
+- **The CAF endianness trap.** CAF's LPCM flag bit 1 is
+  `kCAFLinearPCMFormatFlagIsLittleEndian` — the *opposite* sense to the
+  CoreAudio ASBD flag of the same value. Read the ASBD way, every sound is
+  full-scale white noise. Found without listening: the inverted read made
+  every buffer report peak 32768.
+- **Apple's CgBI PNGs decode.** Seven of Canabalt's 73 — all gameplay art —
+  carry a private critical chunk libpng must refuse, raw DEFLATE with no zlib
+  wrapper, and premultiplied BGRA. The distance counter is on screen now,
+  because that is `hud.png`.
+- **Imports still owed are named, not counted**, which immediately found
+  `_CGAffineTransformIdentity` being answered with zeroes — an identity matrix
+  read as zeroes collapses everything it transforms onto a point.
+- **`vnmul`**, which took *Angry Birds Rio* from 98.8% to **99.7% of 3,633
+  functions** — 21% Thumb, so interworking works.
+- `ARC_VOLUME` scales the master gain and `ARC_TRACE_AUDIO` reports every
+  buffer with its peak, because a buffer of the right length full of zeroes is
+  indistinguishable from working until someone listens.
 
 ### v0.4.0 — _"Playable"_ (September 2026)
 

@@ -124,6 +124,13 @@ CASES = [
     ("ext: rev", 0xE6BF0F31, False, "byte reverse"),
     ("ext: clz", 0xE16F0F11, False, "count leading zeroes"),
 
+    # 9. VFP. The negated family is where the names mislead: VNMUL negates the
+    #    product, VNMLA negates the accumulator and not the product.
+    ("vfp: vmul.f32", 0xEE200A81, False, "single-precision multiply"),
+    ("vfp: vnmul.f32", 0xEE200AC1, False, "the product, negated"),
+    ("vfp: vadd.f32", 0xEE300A81, False, "add, and its NaN sign"),
+    ("vfp: vneg.f32", 0xEEB10A41, False, "negate"),
+
     # --------------------------------------------------------------- Thumb
     # The other instruction set in the same binary. Canabalt is 0% Thumb, so
     # nothing else in this repository exercises these on a real target.
