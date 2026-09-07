@@ -22,7 +22,7 @@ duplicate the effort.
 
 ### Recent changes
 
-**Current version: v0.5.0 — _"Sound and Sprites"_ (September 2026).**
+**Current version: v0.6.0 — _"A Second Binary"_ (September 2026).**
 See the [Changelog](#changelog) for what landed and when.
 
 **New here?** [Getting started](docs/GETTING-STARTED.md) walks an `.ipa` all
@@ -339,12 +339,41 @@ The reasoning behind each of these is in
       CgBI-crushed PNGs decode, so the gameplay art and the distance counter
       are on screen. The imports still owed are named rather than counted,
       which found `_CGAffineTransformIdentity` being answered with zeroes.
-- [ ] **M12 — a second title.** *Angry Birds Rio* lifts **3,623 of 3,633
-      functions (99.7%)** at 21% Thumb, so interworking works; six forms block
-      the last ten. The host contract is the rest of the job: 359 undefined
-      symbols against Canabalt's 205, and 38 classes against 49.
+- [ ] **M12 — a second title.** *Angry Birds Rio* lifts **3,624 of 3,633
+      functions (99.8%)** at 21% Thumb, so interworking works. It binds its
+      725 class references out of classic `LC_DYSYMTAB` relocations, because
+      it carries no `LC_DYLD_INFO` at all; 149 of its 267 imports are
+      answered; and it runs through class setup into its own C++ engine, where
+      it stops constructing a `lang::Throwable` -- it has decided to report an
+      error and faults building the message. Which error needs the thing that
+      is already known to be missing: a fault that names its instruction
+      rather than its address.
 
 ## Changelog
+
+### v0.6.0 — _"A Second Binary"_ (September 2026)
+
+Driving *Angry Birds Rio* found four things Canabalt structurally could not.
+
+- **Classic relocations.** Angry Birds carries no `LC_DYLD_INFO` at all, so
+  its class references and superclass fields live in `LC_DYSYMTAB`'s external
+  relocations, which the loader ignored. Without them a class whose superclass
+  is `UIView` has a zero there, the chain never reaches `NSObject`, and
+  `+alloc` is not found — so `[MyEAGLView alloc]` answers nil while the class
+  itself realizes perfectly. **0 → 725 class references bound**, and 74 of 76
+  classes now find a framework superclass.
+- **Two more switch idioms.** `add pc, pc, rN, lsl #k` — where the table *is*
+  the code — at both stride 4 and stride 8, plus a bound stated by `rsbs`
+  rather than `cmp`. Worth **28,000 instructions** no walk could reach.
+- **The C library**, ~90 functions: string, memory, math with softfp
+  arguments, `operator new` on the guest heap, the SjLj unwinder, and stdio
+  behind a handle table because a host `FILE*` does not fit in 32 bits.
+- **`memcpy` that describes itself.** The block moves are where a bad guest
+  pointer becomes a host segfault, and an access violation reports nothing at
+  all. They check their range first now, which is how most of the above was
+  found.
+- *Angry Birds* lifts **3,624 of 3,633 functions**, binds its classes, and
+  reaches its own C++ engine.
 
 ### v0.5.0 — _"Sound and Sprites"_ (September 2026)
 
