@@ -444,6 +444,11 @@ void DeliverTouch(Arm32Ctx* c, long frame) {
     g_touch_set = HostSetOf(g_touch);
   }
   if (!g_touch || !g_touch_set) return;
+  // Window pixels to the device-portrait space `locationInView:` is defined
+  // in. The guest does the rotation itself and must be left to: its
+  // `-[FlxGlobal touchPoint]` computes gameX = loc.y and gameY = height -
+  // loc.x, which is the quarter turn its own rendering does. So this undoes
+  // only the window's landscape orientation and hands back portrait pixels.
   g_touch_x = float(WindowHeight()) - t.y;
   g_touch_y = t.x;
 

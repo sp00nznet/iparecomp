@@ -136,6 +136,10 @@ class Lifter:
         # simply does not happen and the load is emitted as a load.
         self.image: bytes = b""
         self.ro_range = (0, 0)   # the read-only span a fold is allowed inside
+        # Resolved switch tables for the function being lifted, keyed by
+        # the address of the load that reads them. Filled by reachable(),
+        # which is the pass that has to follow them anyway.
+        self.tables: dict[int, list[int]] = {}
         self.folded = 0
 
     # --- naming ------------------------------------------------------------
@@ -923,7 +927,18 @@ class Lifter:
 
     def instruction(self, ins, local: set[int]) -> str:
         op = self.root(ins)
-        if op in ALU3:
+        table = self.tables.get(ins.address)
+        if table:
+            # A resolved switch becomes the branch it always was. The guest's
+            # own `cmp` is the bounds check, and the condition this load
+            # carries is what lets an out-of-range selector fall through to
+            # the default -- so the conditional wrapper at the end of this
+            # function is exactly the right thing to leave it to.
+            idx = self.reg(ins, ins.operands[1].mem.index)
+            arms = " ".join(f"case {k}: goto L_{t:08x};"
+                            for k, t in enumerate(table))
+            body = f"switch (ARC_R(c, {idx})) {{ {arms} default: break; }}"
+        elif op in ALU3:
             body = self._alu3(ins, op)
         elif op in ALU2:
             body = self._alu2(ins, op)
@@ -999,6 +1014,77 @@ class Lifter:
                 and self.reg(ins, ops[0].reg) == 15
         return False
 
+    def jump_table(self, insns: dict, a: int):
+        """Targets of `ldr<cond> pc, [pc, rN, lsl #2]` -- an ARM switch.
+
+        A dense switch compiles to a bounds check, a load of the PC from a
+        table indexed by the selector, and a fall-through to the default:
+
+            cmp   r3, #4                  <- the bound, and the only record
+            ldrls pc, [pc, r3, lsl #2]       of how long the table is
+            b     <default>
+            <5 words of absolute addresses>
+
+        The table is read at lift time for exactly the reason a literal-pool
+        load is folded at lift time: it lives in `__TEXT`, which is mapped r-x
+        and cannot be written, and the image is never slid, so those words are
+        already the addresses they will have at run time.
+
+        Without this the walk stops at the load. The table is data, so nothing
+        branches to the case bodies, they are never reached, and they lift to
+        nothing -- then the switch becomes an indirect branch to an address
+        that is inside a function but is not its entry, which the dispatcher
+        cannot answer. Two thirds of `-[Shard init]` was invisible this way,
+        and it is the function `PlayState` faults in.
+
+        Returns None rather than guessing whenever anything does not fit.
+        """
+        ins = insns[a]
+        ops = ins.operands
+        if len(ops) != 2 or ops[0].type != ca.ARM_OP_REG:
+            return None
+        if self.reg(ins, ops[0].reg) != 15 or ops[1].type != ca.ARM_OP_MEM:
+            return None
+        mem = ops[1].mem
+        if not mem.base or self.reg(ins, mem.base) != 15 or not mem.index:
+            return None
+        if ops[1].shift.value != 2:        # a table of words, scaled by 4
+            return None
+        idx = self.reg(ins, mem.index)
+
+        # The bound lives in the compare that set the condition this load is
+        # predicated on. An unconditional load of the PC has no bound at all
+        # and there is nothing here to find.
+        if not ins.cc or ins.cc == ca.ARM_CC_AL:
+            return None
+        count, b = None, a - ins.size
+        for _ in range(4):
+            if b not in insns:
+                break
+            prev = insns[b]
+            pops = prev.operands
+            if prev.mnemonic.split(".")[0] == "cmp" and len(pops) == 2 \
+                    and pops[0].type == ca.ARM_OP_REG \
+                    and self.reg(prev, pops[0].reg) == idx \
+                    and pops[1].type == ca.ARM_OP_IMM:
+                count = pops[1].imm + 1
+                break
+            b -= prev.size
+        if not count or count < 1 or count > 4096:
+            return None
+
+        base = a + 8                       # the ARM PC bias, not a guess
+        out = []
+        for k in range(count):
+            word = self.literal(base + k * 4, 4)
+            # Every entry has to be an instruction in this same function. A
+            # word that is not says the bound was wrong, and a wrong bound
+            # means reading whatever follows the table as addresses.
+            if word is None or (word & 0xFFFFFFFE) not in insns:
+                return None
+            out.append(word & 0xFFFFFFFE)
+        return out
+
     def reachable(self, insns: dict, start: int) -> set[int]:
         """Walk from the entry point.
 
@@ -1007,6 +1093,7 @@ class Lifter:
         never reached -- no heuristic about what a word of zeroes means.
         """
         seen: set[int] = set()
+        self.tables = {}
         work = [start]
         while work:
             a = work.pop()
@@ -1024,6 +1111,12 @@ class Lifter:
                 t = ins.operands[-1].imm & 0xFFFFFFFE
                 if t in insns:
                     work.append(t)
+            # A switch reaches its case bodies only through the table.
+            if ends and op == "ldr" and a not in self.tables:
+                table = self.jump_table(insns, a)
+                if table:
+                    self.tables[a] = table
+                    work.extend(table)
             # A conditional terminator still falls through to the next
             # instruction; only an unconditional one ends the run.
             if not (ends and (not ins.cc or ins.cc == ca.ARM_CC_AL)):
@@ -1048,6 +1141,10 @@ class Lifter:
                 continue
             if op == "b" and ins.operands and ins.operands[-1].type == ca.ARM_OP_IMM:
                 t = ins.operands[-1].imm & 0xFFFFFFFE
+                if t in live:
+                    targets.add(t)
+            # Every case body of a resolved switch is jumped to by label.
+            for t in self.tables.get(a, ()):
                 if t in live:
                     targets.add(t)
 
