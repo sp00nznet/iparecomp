@@ -9,6 +9,8 @@
 // them back.
 #pragma once
 
+#include <map>
+#include <vector>
 #include <string>
 
 #include "arm32_context.h"
@@ -25,6 +27,9 @@ struct BootResult {
   uint32_t entry = 0;
   size_t shims = 0;       // imports a shim claimed
   size_t outstanding = 0; // imports still owed by a framework
+  // Those same imports by name, grouped by the framework that owes each --
+  // so a run says what to write next rather than how much is left.
+  std::map<std::string, std::vector<std::string>> owed;
   size_t bound_classes = 0; // framework class references dyld would have filled
   size_t bound_slots = 0;   // import pointer slots pointed at their stubs
   size_t synthetic = 0;     // imports the linker gave no stub, given one here

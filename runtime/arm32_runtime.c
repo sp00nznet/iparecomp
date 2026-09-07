@@ -205,6 +205,14 @@ typedef struct {
 static StubEntry g_stubs[ARC_MAX_STUBS];
 static size_t g_stub_count;
 
+const char* arc_native_name(uint32_t address) {
+  for (size_t i = 0; i < g_native_count; ++i)
+    if (g_natives[i].address == address) return g_natives[i].name;
+  for (size_t i = 0; i < g_ctx_native_count; ++i)
+    if (g_ctx_natives[i].address == address) return g_ctx_natives[i].name;
+  return NULL;
+}
+
 void arc_register_stub(uint32_t address, const char* name, const char* owner) {
   if (!address || g_stub_count >= ARC_MAX_STUBS) return;
   for (size_t i = 0; i < g_stub_count; ++i)

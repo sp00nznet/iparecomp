@@ -87,10 +87,27 @@ else()
 endif()
 
 find_package(ZLIB QUIET)
+if(NOT ZLIB_FOUND AND PKG_CONFIG_FOUND)
+  pkg_check_modules(ZLIB_PC QUIET zlib)
+endif()
 if(ZLIB_FOUND)
   target_link_libraries(iparecomp PUBLIC ZLIB::ZLIB)
   target_compile_definitions(iparecomp PUBLIC ARC_HAVE_ZLIB)
   message(STATUS "iparecomp: zlib found")
+elseif(ZLIB_PC_FOUND)
+  target_include_directories(iparecomp PUBLIC ${ZLIB_PC_INCLUDE_DIRS})
+  target_link_libraries(iparecomp PUBLIC ${ZLIB_PC_LIBRARIES})
+  target_link_directories(iparecomp PUBLIC ${ZLIB_PC_LIBRARY_DIRS})
+  target_compile_definitions(iparecomp PUBLIC ARC_HAVE_ZLIB)
+  message(STATUS "iparecomp: zlib ${ZLIB_PC_VERSION} via pkg-config")
+elseif(PNG_FOUND OR PNG_PC_FOUND)
+  # libpng cannot exist without zlib, so if libpng was found and zlib was not,
+  # the finder is wrong rather than the library missing. Apple's CgBI PNGs are
+  # decoded here directly and need inflate, so this is not optional once
+  # images are.
+  target_link_libraries(iparecomp PUBLIC z)
+  target_compile_definitions(iparecomp PUBLIC ARC_HAVE_ZLIB)
+  message(STATUS "iparecomp: zlib assumed alongside libpng")
 else()
   message(STATUS "iparecomp: no zlib -- those imports stay on the work list")
 endif()

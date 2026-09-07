@@ -173,6 +173,18 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
     if (const uint32_t at = arc_guest_alloc(64, 8)) {
       img.SetImportStub(i, at);
       ++r.synthetic;
+      // ...and wrong for the ones whose value is not zero. There is exactly
+      // one of those here, and it is the worst kind of wrong: an identity
+      // matrix read as zeroes is a transform that collapses everything it
+      // touches onto a single point, silently.
+      if (im.name == "_CGAffineTransformIdentity") {
+        const float identity[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+        for (int w = 0; w < 6; ++w) {
+          uint32_t bits;
+          std::memcpy(&bits, &identity[w], 4);
+          ARC_ST32(at + uint32_t(w * 4), bits);
+        }
+      }
     }
   }
 
@@ -213,16 +225,22 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   // one reports what to write next instead of an address. Registration is
   // idempotent and the real shims went in first, so this only fills the gaps.
   static std::deque<std::string> kept;
+  std::map<std::string, std::vector<std::string>> owed;
   for (const auto& im : img.imports()) {
     if (!im.stub) continue;
+    // A stub with a native behind it is answered; one without is the work.
+    // Asking the table beats subtracting two counts, which is what this used
+    // to do and which could only ever produce a number.
+    if (!arc_native_name(im.stub)) {
+      owed[im.dylib].push_back(im.name);
+      ++r.outstanding;
+    }
     kept.push_back(im.name);
     const char* name = kept.back().c_str();
     kept.push_back(im.dylib);
     arc_register_stub(im.stub, name, kept.back().c_str());
-    ++r.outstanding;
   }
-  // What the shims already answer is not outstanding.
-  r.outstanding = r.outstanding > r.shims ? r.outstanding - r.shims : 0;
+  r.owed = owed;
 
   r.entry = img.entry();
   if (!r.entry) {
@@ -235,6 +253,16 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
   // the most useful numbers are the ones you never see.
   std::printf("shims      %zu imports claimed, %zu still owed\n", r.shims,
               r.outstanding);
+  // Named, not counted. The whole argument for a permissive run is that one
+  // run should say what to write next, and "32 still owed" says only how far
+  // there is to go.
+  for (const auto& lib_syms : r.owed) {
+    std::printf("           %s owes %zu:", lib_syms.first.c_str(),
+                lib_syms.second.size());
+    for (size_t i = 0; i < lib_syms.second.size(); ++i)
+      std::printf("%s%s", i ? ", " : " ", lib_syms.second[i].c_str());
+    std::printf("\n");
+  }
   std::printf("classrefs  %zu bound, %zu pointer slots filled, "
               "%zu imports given a synthetic address\n",
               r.bound_classes, r.bound_slots, r.synthetic);

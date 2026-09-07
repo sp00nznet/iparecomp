@@ -375,6 +375,12 @@ void arc_register_ctx_native(uint32_t address, const char* name, ArcCtxFn fn);
 // is simply work, and the two want telling apart at a glance.
 void arc_register_stub(uint32_t address, const char* name, const char* owner);
 
+// The name of the host function registered at `address`, or NULL if nothing
+// answers there yet. What it is for: an import with a stub and no native is
+// one nobody has written, and listing those by name is the difference between
+// "32 still owed" and a work list.
+const char* arc_native_name(uint32_t address);
+
 // Answer an unimplemented import with zero and record it, rather than
 // stopping. The same measuring instrument the Objective-C side has: one run
 // then names every missing import as well as every missing message, instead of

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <png.h>
+#include <zlib.h>
 
 #include "arc_mem.h"
 #include "arm32_context.h"
@@ -73,22 +74,150 @@ float Af(Arm32Ctx* c, int i) {
   return f;
 }
 
+// --- Apple's CgBI PNGs ------------------------------------------------------
+//
+// A PNG inside a shipped .ipa may have been through Xcode's "compress PNG
+// files" step, which does not produce a PNG. It produces a variant with a
+// private `CgBI` chunk marked critical, so a conforming decoder must refuse
+// it -- libpng says `CgBI: unhandled critical chunk` and stops. Three things
+// differ, and all three have to be undone:
+//
+//   1. the `CgBI` chunk, which is simply dropped;
+//   2. the IDAT stream is raw DEFLATE with no zlib header or Adler-32, so it
+//      needs inflating with negative window bits and re-wrapping;
+//   3. the pixels are BGRA with premultiplied alpha, not RGBA straight.
+//
+// Only 7 of Canabalt's 73 files are like this, and they are all gameplay art
+// -- block, slope, hud, gameover -- so the menu loads without any of this and
+// the game does not.
+bool IsCgBI(const std::vector<uint8_t>& f) {
+  return f.size() > 16 && std::memcmp(f.data() + 12, "CgBI", 4) == 0;
+}
+
+uint32_t Be32At(const uint8_t* p) {
+  return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
+}
+
+void PutBe32(std::vector<uint8_t>& v, uint32_t x) {
+  v.push_back(uint8_t(x >> 24));
+  v.push_back(uint8_t(x >> 16));
+  v.push_back(uint8_t(x >> 8));
+  v.push_back(uint8_t(x));
+}
+
+void PutChunk(std::vector<uint8_t>& out, const char* type,
+              const uint8_t* data, size_t n) {
+  PutBe32(out, uint32_t(n));
+  const size_t crc_from = out.size();
+  out.insert(out.end(), type, type + 4);
+  out.insert(out.end(), data, data + n);
+  const uLong crc = crc32(0, out.data() + crc_from, uInt(4 + n));
+  PutBe32(out, uint32_t(crc));
+}
+
+// Rebuild a standard PNG from a CgBI one, so libpng does the unfiltering --
+// which is the part worth not reimplementing.
+bool RepackCgBI(const std::vector<uint8_t>& in, std::vector<uint8_t>* out) {
+  std::vector<uint8_t> idat;
+  std::vector<uint8_t> head;   // IHDR and anything else worth keeping
+  size_t p = 8;
+  bool have_ihdr = false;
+  while (p + 12 <= in.size()) {
+    const uint32_t len = Be32At(in.data() + p);
+    const char* type = reinterpret_cast<const char*>(in.data() + p + 4);
+    if (p + 12 + len > in.size()) break;
+    const uint8_t* body = in.data() + p + 8;
+    if (std::memcmp(type, "IHDR", 4) == 0) {
+      head.assign(body, body + len);
+      have_ihdr = true;
+    } else if (std::memcmp(type, "IDAT", 4) == 0) {
+      idat.insert(idat.end(), body, body + len);
+    } else if (std::memcmp(type, "IEND", 4) == 0) {
+      break;
+    }
+    p += 12 + len;
+  }
+  if (!have_ihdr || idat.empty() || head.size() < 13) return false;
+
+  // Raw DEFLATE in, so negative window bits. A conforming stream would have a
+  // two-byte zlib header this one does not carry.
+  std::vector<uint8_t> raw;
+  z_stream zs{};
+  if (inflateInit2(&zs, -15) != Z_OK) return false;
+  zs.next_in = const_cast<Bytef*>(idat.data());
+  zs.avail_in = uInt(idat.size());
+  std::vector<uint8_t> chunk(65536);
+  int rc = Z_OK;
+  do {
+    zs.next_out = chunk.data();
+    zs.avail_out = uInt(chunk.size());
+    rc = inflate(&zs, Z_NO_FLUSH);
+    if (rc != Z_OK && rc != Z_STREAM_END && rc != Z_BUF_ERROR) break;
+    raw.insert(raw.end(), chunk.data(), chunk.data() + (chunk.size() - zs.avail_out));
+  } while (rc == Z_OK && zs.avail_in);
+  inflateEnd(&zs);
+  if (raw.empty()) return false;
+
+  uLongf bound = compressBound(uLong(raw.size()));
+  std::vector<uint8_t> packed(bound);
+  if (compress2(packed.data(), &bound, raw.data(), uLong(raw.size()), 6) != Z_OK)
+    return false;
+  packed.resize(bound);
+
+  out->assign(in.begin(), in.begin() + 8);          // the signature
+  PutChunk(*out, "IHDR", head.data(), head.size());
+  PutChunk(*out, "IDAT", packed.data(), packed.size());
+  PutChunk(*out, "IEND", nullptr, 0);
+  return true;
+}
+
+struct MemRead { const uint8_t* p; size_t left; };
+
+void ReadFromMemory(png_structp png, png_bytep out, png_size_t n) {
+  MemRead* m = static_cast<MemRead*>(png_get_io_ptr(png));
+  const size_t take = n < m->left ? size_t(n) : m->left;
+  std::memcpy(out, m->p, take);
+  m->p += take;
+  m->left -= take;
+}
+
 bool LoadPng(const std::string& path, Image* out) {
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) return false;
+  std::vector<uint8_t> file;
+  {
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n > 0) {
+      file.resize(size_t(n));
+      if (std::fread(file.data(), 1, file.size(), f) != file.size())
+        file.clear();
+    }
+  }
+  std::fclose(f);
+  if (file.size() < 16) return false;
+
+  const bool cgbi = IsCgBI(file);
+  std::vector<uint8_t> repacked;
+  if (cgbi) {
+    if (!RepackCgBI(file, &repacked)) {
+      std::printf("image: %s is CgBI and would not repack\n", path.c_str());
+      return false;
+    }
+    file.swap(repacked);
+  }
+
   png_structp png =
       png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-  if (!png) {
-    std::fclose(f);
-    return false;
-  }
+  if (!png) return false;
   png_infop info = png_create_info_struct(png);
   if (!info || setjmp(png_jmpbuf(png))) {
     png_destroy_read_struct(&png, info ? &info : nullptr, nullptr);
-    std::fclose(f);
     return false;
   }
-  png_init_io(png, f);
+  MemRead src{file.data(), file.size()};
+  png_set_read_fn(png, &src, ReadFromMemory);
   png_read_info(png, info);
 
   // Normalise everything to 8-bit RGBA, which is what GL is going to be given
@@ -114,7 +243,24 @@ bool LoadPng(const std::string& path, Image* out) {
     rows[size_t(y)] = out->rgba.data() + size_t(y) * size_t(out->width) * 4;
   png_read_image(png, rows.data());
   png_destroy_read_struct(&png, &info, nullptr);
-  std::fclose(f);
+
+  // The two remaining differences, and they are per-pixel: the channels are
+  // BGRA rather than RGBA, and the colour is premultiplied by the alpha.
+  // Undoing the multiply is what makes an edge pixel the colour it was
+  // painted rather than a darker version of it, and skipping it leaves every
+  // sprite with a dark halo that looks like bad art rather than a bug.
+  if (cgbi) {
+    for (size_t i = 0; i + 3 < out->rgba.size(); i += 4) {
+      std::swap(out->rgba[i], out->rgba[i + 2]);
+      const uint8_t a = out->rgba[i + 3];
+      if (a && a != 0xFF) {
+        for (int k = 0; k < 3; ++k) {
+          const unsigned v = (unsigned(out->rgba[i + k]) * 255u + a / 2) / a;
+          out->rgba[i + k] = uint8_t(v > 255u ? 255u : v);
+        }
+      }
+    }
+  }
   return true;
 }
 
