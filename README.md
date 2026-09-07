@@ -3,17 +3,17 @@
 > A toolkit for turning old iOS apps' binaries into native desktop
 > applications. Bring your own `.ipa`.
 
-**Status: a lifted game draws its menu, and answers a tap.** All 626 of
+**Status: a lifted game is playable.** All 626 of
 Canabalt's functions lift to C; 23,111 per-instruction cases over 191 operand
 forms and 2,967 whole-function cases agree with Unicorn. The image maps at its
 own link address with a zero slide, `objc_msgSend` dispatches into lifted code,
 and the guest runs from `_start` through the whole launch into an SDL window
 driving its own frame loop -- textures uploaded, text rasterised through
 FreeType, the menu on screen the right way up, and a tap on a button running
-that button's action. What it still asks for is measured, not guessed: one run
-reports **115 imports claimed and 32 still owed**, and tapping PLAY builds
-`PlayState` and faults there, which is where the work is.
-See [Milestones](#milestones).
+that button's action -- and a tap on PLAY starts the game, which then runs:
+the runner on the rooftops, the skyline scrolling behind, level generated as
+it goes. What it still asks for is measured, not guessed: one run reports
+**115 imports claimed and 32 still owed**. See [Milestones](#milestones).
 
 **[Join the sp00nznet recomp Discord](https://discord.gg/CRpzGWZFcu)** — the
 community hub for sp00nznet's recomp projects. Good place to ask questions,
@@ -22,7 +22,7 @@ duplicate the effort.
 
 ### Recent changes
 
-**Current version: v0.3.0 — _"Stripped"_ (September 2026).**
+**Current version: v0.4.0 — _"Playable"_ (September 2026).**
 See the [Changelog](#changelog) for what landed and when.
 
 **New here?** [Getting started](docs/GETTING-STARTED.md) walks an `.ipa` all
@@ -325,12 +325,38 @@ The reasoning behind each of these is in
       second pass. At 300 frames the menu is complete and the frame is 100% not
       black: the logo, the skyline, the billboard, and the ABOUT and PLAY
       buttons, either of which runs its action when tapped.
-- [ ] **M10 — the game itself.** PLAY reaches `PlayState` and faults building
-      its sprites. From here the work is gameplay rather than launch: the
-      sprite and tilemap paths, audio that actually plays, and whatever the 32
-      outstanding imports turn out to be.
+- [x] **M10 — the game itself.** PLAY starts it, and it runs: `PlayState`
+      builds, the runner is on the rooftops, the skyline scrolls, and the
+      level is generated as it goes. What stood in the way was one switch --
+      `ldrls pc, [pc, r3, lsl #2]` in `-[Shard init]`, whose case bodies the
+      reachability walk could not see, leaving 540 of the function's 807
+      instructions unlifted. Tables are resolved at lift time now, from
+      read-only `__TEXT` on an unslid image, with the bound taken from the
+      guest's own `cmp`.
+- [ ] **M11 — the rest of it.** Audio that actually plays, the 32 imports
+      still owed, the 7 CgBI-crushed PNGs that libpng refuses (`block`,
+      `slope`, `hud`, `gameover` -- the gameplay set), and Thumb-2 for the
+      titles that are not this one.
 
 ## Changelog
+
+### v0.4.0 — _"Playable"_ (September 2026)
+
+Canabalt plays. Tap PLAY and the runner runs.
+
+- **The lifter follows a jump table.** `ldrls pc, [pc, rN, lsl #2]` is a dense
+  switch, and the reachability walk stopped dead at it: the table is data, so
+  nothing branched to the case bodies and they lifted to nothing. Resolved
+  exactly -- the table is in read-only `__TEXT` on an unslid image, so it is
+  read at lift time like any literal, and the bound comes from the `cmp` that
+  set the condition. **540 of the 807 instructions in `-[Shard init]` were
+  invisible**, which is the function `PlayState` builds its shards in.
+- That is also a correction to what "626 of 626 functions complete" meant: it
+  was complete over everything the walk could *reach*, and the walk could not
+  reach through a switch.
+- The touch transform records why it is what it is. The guest does its own
+  quarter turn in `-[FlxGlobal touchPoint]`, so the host undoes only the
+  window's landscape orientation.
 
 ### v0.3.0 — _"Stripped"_ (September 2026)
 
