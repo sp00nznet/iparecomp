@@ -6,6 +6,7 @@
 
 #include <csetjmp>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -21,6 +22,7 @@ namespace arc {
 size_t InstallLibSystemShims(const MachOImage& img);
 size_t InstallUIKitShims(const MachOImage& img);
 bool GuestExited(int* code);
+uint32_t GuestRuneLocale();
 void InstallObjectShims();
 void InstallClassHierarchy();
 void InstallUIKitObjects();
@@ -201,6 +203,14 @@ BootResult Boot(MachOImage& img, void (*install_lifted)(uint32_t),
       // one of those here, and it is the worst kind of wrong: an identity
       // matrix read as zeroes is a transform that collapses everything it
       // touches onto a single point, silently.
+      // BSD's character tables are not 64 bytes of anything: isdigit and its
+      // family are compiled inline as a bit test against a 256-entry table
+      // hanging off this symbol. Zeroes make every character unclassifiable,
+      // which is not a failure anything reports -- it is a format parser that
+      // never terminates.
+      if (im.name == "__DefaultRuneLocale") {
+        if (const uint32_t table = GuestRuneLocale()) img.SetImportStub(i, table);
+      }
       if (im.name == "_CGAffineTransformIdentity") {
         const float identity[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
         for (int w = 0; w < 6; ++w) {
@@ -336,8 +346,17 @@ void ReportTrail(const MachOImage& img) {
 
   const size_t frames = arc_frame_count();
   if (frames) {
+    // 48 by default; ARC_TRAIL=n for more. When the trail is a repeating
+    // cycle, the frame that *started* it is the one just past the end of
+    // whatever was printed, so a fixed depth hides exactly the entry the
+    // report exists to name.
+    size_t depth = 48;
+    if (const char* e = std::getenv("ARC_TRAIL")) {
+      const long n = std::strtol(e, nullptr, 10);
+      if (n > 0) depth = size_t(n);
+    }
     std::printf("\nguest functions entered, most recent first:\n");
-    for (size_t i = 0; i < frames && i < 48; ++i) {
+    for (size_t i = 0; i < frames && i < depth; ++i) {
       const uint32_t a = arc_frame_at(i);
       const uint32_t from = arc_frame_caller(i);
       const char* n = NameOf(img, a);

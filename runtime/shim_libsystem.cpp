@@ -14,6 +14,7 @@
 // them. iOS on armv6 passes floats and doubles in the integer registers at a
 // public boundary, so `sin` arrives as a double split across r0 and r1 rather
 // than in a VFP register. Those get the fuller shim that sees the context.
+#include <cctype>
 #include <cmath>
 #include <ctime>
 #include <strings.h>
@@ -376,6 +377,57 @@ uint32_t ShimThrow(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
   return 0;
 }
 
+// `__cxa_throw(obj, type, dtor)` -- and `obj` is the only thing here worth
+// having, because a thrown object almost always carries the sentence its
+// author wrote about the failure. Reporting "a C++ exception" when the guest
+// is holding "cannot open data_iphone/bundleIndex.idx" is throwing away the
+// answer.
+//
+// Nothing here knows the guest's class layouts, so it does not guess one: it
+// looks for text. A pointer-sized word that leads to printable ASCII is
+// reported, and one that does not is skipped. That is right for any engine
+// whose exception carries a string somewhere in its first few fields, which
+// is most of them, and wrong in the harmless direction otherwise.
+bool PrintableAt(uint32_t p, char* out, size_t cap) {
+  if (!p || !arc_guest_plausible(p)) return false;
+  size_t n = 0;
+  for (; n + 1 < cap; ++n) {
+    const uint8_t ch = uint8_t(ARC_LD8(p + uint32_t(n)));
+    if (!ch) break;
+    if (ch < 0x20 || ch > 0x7E) return false;
+    out[n] = char(ch);
+  }
+  out[n] = 0;
+  return n >= 4;                      // a word or two, not a stray byte
+}
+
+uint32_t ShimCxaThrow(uint32_t obj, uint32_t, uint32_t, uint32_t, uint32_t,
+                      uint32_t, uint32_t, uint32_t) {
+  char text[192] = {0};
+  char why[288];
+  bool found = false;
+  if (obj && arc_guest_plausible(obj)) {
+    // The object itself first: a small-string-optimised string keeps its
+    // characters inline, so the text is at offset zero with no indirection.
+    found = PrintableAt(obj, text, sizeof text);
+    // Then the first few fields, each as a possible pointer to the text.
+    for (uint32_t off = 0; !found && off <= 0x20; off += 4)
+      found = PrintableAt(ARC_LD32(obj + off), text, sizeof text);
+  }
+  if (found)
+    std::snprintf(why, sizeof why,
+                  "the guest threw a C++ exception: \"%s\" -- and SjLj "
+                  "unwinding is not implemented, so nothing can catch it",
+                  text);
+  else
+    std::snprintf(why, sizeof why,
+                  "the guest threw a C++ exception (object %#x, no text found "
+                  "in it); SjLj unwinding is not implemented",
+                  obj);
+  arc_trap(nullptr, why);
+  return 0;
+}
+
 
 // --- stdio ------------------------------------------------------------------
 //
@@ -529,6 +581,102 @@ uint32_t ShimRename(uint32_t a1, uint32_t b1, uint32_t, uint32_t, uint32_t,
   return a1 && b1 ? uint32_t(std::rename(CPtr(a1), CPtr(b1))) : 0xFFFFFFFFu;
 }
 
+
+// --- character classification ----------------------------------------------
+//
+// `__DefaultRuneLocale` is not a stub-shaped thing, and answering it the way
+// the other data imports are answered -- 64 zeroed bytes -- is how a missing
+// symbol becomes an infinite loop three libraries away.
+//
+// BSD compiles `isdigit(c)` *inline*, as a bit test against a table hanging
+// off that symbol:
+//
+//     ldr  sb, [pc, r2]        ; &_DefaultRuneLocale
+//     ldr  r0, [r1, #0x34]     ; __runetype[c], the table at offset 0x34
+//     tst  r0, #0x400          ; _CTYPE_D
+//
+// With the symbol pointing at zeroes, every character is not a digit, not a
+// letter and not a space -- and reads past the end of the allocation for any
+// character above two. Angry Birds' format-string parser then cannot find the
+// digits in its own format specifier, does not fail, and recurses until the
+// guest stack is gone: 8,850 frames of `lang::Format::format` calling itself.
+//
+// So the table is built for real, from the host's own classification, once.
+
+const uint32_t kRuneTypeOffset = 0x34;   // offsetof(_RuneLocale, __runetype)
+
+// The _CTYPE_* bits, which are ABI and not ours to choose.
+const uint32_t kCtypeA = 0x00000100u;    // alpha
+const uint32_t kCtypeC = 0x00000200u;    // control
+const uint32_t kCtypeD = 0x00000400u;    // digit
+const uint32_t kCtypeG = 0x00000800u;    // graph
+const uint32_t kCtypeL = 0x00001000u;    // lower
+const uint32_t kCtypeP = 0x00002000u;    // punct
+const uint32_t kCtypeS = 0x00004000u;    // space
+const uint32_t kCtypeU = 0x00008000u;    // upper
+const uint32_t kCtypeX = 0x00010000u;    // hex digit
+const uint32_t kCtypeB = 0x00020000u;    // blank
+const uint32_t kCtypeR = 0x00040000u;    // print
+
+uint32_t RuneTypeOf(int ch) {
+  uint32_t t = 0;
+  if (std::isalpha(ch)) t |= kCtypeA;
+  if (std::iscntrl(ch)) t |= kCtypeC;
+  if (std::isdigit(ch)) t |= kCtypeD;
+  if (std::isgraph(ch)) t |= kCtypeG;
+  if (std::islower(ch)) t |= kCtypeL;
+  if (std::ispunct(ch)) t |= kCtypeP;
+  if (std::isspace(ch)) t |= kCtypeS;
+  if (std::isupper(ch)) t |= kCtypeU;
+  if (std::isxdigit(ch)) t |= kCtypeX;
+  if (ch == ' ' || ch == '\t') t |= kCtypeB;
+  if (std::isprint(ch)) t |= kCtypeR;
+  // The low eight bits carry the printing width, which is 1 for anything
+  // printable and 0 otherwise.
+  if (std::isprint(ch)) t |= 1u;
+  return t;
+}
+
+uint32_t g_rune_locale = 0;
+
+uint32_t RuneLocale() {
+  if (g_rune_locale) return g_rune_locale;
+  // magic + encoding + two function pointers + invalid_rune, then three
+  // 256-entry tables: __runetype, __maplower, __mapupper.
+  const uint32_t size = kRuneTypeOffset + 256u * 4u * 3u;
+  const uint32_t at = arc_guest_calloc(1, size);
+  if (!at) return 0;
+  std::memcpy(reinterpret_cast<void*>(uintptr_t(at)), "RuneMagA", 8);
+  for (uint32_t c = 0; c < 256; ++c) {
+    const int ch = int(c);
+    ARC_ST32(at + kRuneTypeOffset + c * 4, RuneTypeOf(ch));
+    ARC_ST32(at + kRuneTypeOffset + 256 * 4 + c * 4,
+             uint32_t(std::tolower(ch)));
+    ARC_ST32(at + kRuneTypeOffset + 512 * 4 + c * 4,
+             uint32_t(std::toupper(ch)));
+  }
+  g_rune_locale = at;
+  return at;
+}
+
+// The out-of-line forms, for characters the inline test punts on.
+uint32_t ShimMaskrune(uint32_t ch, uint32_t mask, uint32_t, uint32_t, uint32_t,
+                      uint32_t, uint32_t, uint32_t) {
+  const uint32_t at = RuneLocale();
+  if (!at || ch > 255) return 0;
+  return ARC_LD32(at + kRuneTypeOffset + ch * 4) & mask;
+}
+
+uint32_t ShimTolower(uint32_t ch, uint32_t, uint32_t, uint32_t, uint32_t,
+                     uint32_t, uint32_t, uint32_t) {
+  return ch < 256 ? uint32_t(std::tolower(int(ch))) : ch;
+}
+
+uint32_t ShimToupper(uint32_t ch, uint32_t, uint32_t, uint32_t, uint32_t,
+                     uint32_t, uint32_t, uint32_t) {
+  return ch < 256 ? uint32_t(std::toupper(int(ch))) : ch;
+}
+
 struct PlainShim {
   const char* name;
   ArcNativeFn fn;
@@ -584,7 +732,7 @@ const PlainShim kPlain[] = {
     {"__Unwind_SjLj_Register", ShimUnwindNop},
     {"__Unwind_SjLj_Unregister", ShimUnwindNop},
     {"__Unwind_SjLj_Resume", ShimThrow},
-    {"___cxa_throw", ShimThrow},
+    {"___cxa_throw", ShimCxaThrow},
     {"___cxa_allocate_exception", ShimNew},
     {"___cxa_begin_catch", ShimUnwindNop},
     {"___cxa_end_catch", ShimUnwindNop},
@@ -601,6 +749,8 @@ const PlainShim kPlain[] = {
     {"_fflush", ShimFflush},        {"_clearerr", ShimClearerr},
     {"_getc", ShimGetc},            {"_ungetc", ShimUngetc},
     {"_fgets", ShimFgets},          {"_fputc", ShimFputc},
+    {"___maskrune", ShimMaskrune},  {"___tolower", ShimTolower},
+    {"___toupper", ShimToupper},
     {"_fputs", ShimFputs},          {"_remove", ShimRemove},
     {"_rename", ShimRename},        {"_setvbuf", ShimNop},
 };
@@ -624,6 +774,10 @@ const CtxShim kCtx[] = {
 };
 
 }  // namespace
+
+// The address of the BSD rune table, built on first use. The loader points
+// `__DefaultRuneLocale` at this instead of at zeroed memory.
+uint32_t GuestRuneLocale() { return RuneLocale(); }
 
 bool GuestExited(int* code) {
   if (code) *code = g_exit_code;

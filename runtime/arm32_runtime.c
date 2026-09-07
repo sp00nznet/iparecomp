@@ -69,7 +69,11 @@ void arc_trace_clear(void) { t_trace_next = t_trace_seen = 0; }
 // Global rather than per-thread, deliberately. A per-thread ring can only be
 // read from the thread that filled it, which forces reporting to happen inside
 // the guest call itself -- exactly where it is least safe to do anything.
-#define ARC_FRAME_RING 256
+/* Deep enough to hold the origin of a repeating cycle. At 256, a run that
+   throws in a loop wraps the ring in about thirty iterations and the frame
+   that started it is gone -- which is precisely the frame the report exists
+   to name. Two words each, so 8192 is 64 KB and buys the whole answer. */
+#define ARC_FRAME_RING 8192
 static uint32_t t_frames[ARC_FRAME_RING];
 static uint32_t t_callers[ARC_FRAME_RING];
 static size_t t_frame_next, t_frame_seen;
