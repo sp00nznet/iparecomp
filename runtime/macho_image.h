@@ -152,6 +152,11 @@ class MachOImage {
   std::vector<Binding> bindings_;
   void ParseBindings(const uint8_t* base, uint32_t off, uint32_t size,
                      bool lazy);
+  // The same information from the older mechanism, for images that carry no
+  // LC_DYLD_INFO at all -- which is every Angry Birds binary measured.
+  void ParseExternalRelocs(const uint8_t* base, uint32_t off, uint32_t count,
+                           const uint8_t* symtab, uint32_t nsyms,
+                           const char* strings, uint32_t strsize);
 
   std::string arch_, error_, path_;
   uint32_t entry_ = 0, slide_ = 0, link_base_ = 0;

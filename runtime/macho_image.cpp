@@ -167,6 +167,7 @@ bool MachOImage::Load(const std::string& path, const std::string& want_arch) {
   const uint8_t* end = file_.data() + file_.size();
   uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
   uint32_t indirect_off = 0, nindirect = 0;
+  uint32_t extrel_off = 0, nextrel = 0;
   uint32_t bind_off = 0, bind_size = 0, lazy_off = 0, lazy_size = 0;
 
   for (uint32_t i = 0; i < ncmds && p + 8 <= end; ++i) {
@@ -227,6 +228,8 @@ bool MachOImage::Load(const std::string& path, const std::string& want_arch) {
     } else if (cmd == LC_DYSYMTAB) {
       memcpy(&indirect_off, p + 8 + 12 * 4, 4);
       memcpy(&nindirect, p + 8 + 13 * 4, 4);
+      memcpy(&extrel_off, p + 8 + 14 * 4, 4);
+      memcpy(&nextrel, p + 8 + 15 * 4, 4);
     } else if (cmd == LC_DYLD_INFO || cmd == LC_DYLD_INFO_ONLY) {
       memcpy(&bind_off, p + 16, 4);
       memcpy(&bind_size, p + 20, 4);
@@ -330,7 +333,61 @@ bool MachOImage::Load(const std::string& path, const std::string& want_arch) {
 
   ParseBindings(base, bind_off, bind_size, false);
   ParseBindings(base, lazy_off, lazy_size, true);
+  // Both sources, not one or the other. A binary carries dyld info or classic
+  // relocations depending on how old its linker was, and reading whichever is
+  // present costs nothing when it is absent.
+  ParseExternalRelocs(base, extrel_off, nextrel, base + symoff, nsyms,
+                      reinterpret_cast<const char*>(base + stroff), strsize);
   return true;
+}
+
+
+// The other way an external symbol reaches a binary, and the only way in some
+// of them.
+//
+// `ParseBindings` above reads the dyld bind opcodes, which is what a binary
+// with LC_DYLD_INFO carries. Angry Birds Rio has no LC_DYLD_INFO at all --
+// neither does Angry Birds Halloween -- and says the same things through the
+// older mechanism instead: external relocations in LC_DYSYMTAB, one 8-byte
+// entry per word to fill, each naming a symbol table index.
+//
+// Missing these is not a partial failure. Every Objective-C class reference
+// and every superclass field is one of these entries, so without them a class
+// whose superclass is UIView has a zero there, the chain never reaches
+// NSObject, and `+alloc` -- which NSObject defines -- is not found. The
+// symptom is `[MyEAGLView alloc]` answering nil while the class itself
+// realizes perfectly, which points nowhere near the cause.
+void MachOImage::ParseExternalRelocs(const uint8_t* base, uint32_t off,
+                                     uint32_t count, const uint8_t* symtab,
+                                     uint32_t nsyms, const char* strings,
+                                     uint32_t strsize) {
+  if (!off || !count || !symtab || !strings) return;
+  const uint8_t* p = base + off;
+  for (uint32_t i = 0; i < count; ++i, p += 8) {
+    int32_t r_address;
+    uint32_t packed;
+    memcpy(&r_address, p, 4);
+    memcpy(&packed, p + 4, 4);
+    // A scattered relocation uses the top bit of r_address for a different
+    // layout entirely and never names an external symbol.
+    if (r_address < 0) continue;
+    const uint32_t symbolnum = packed & 0x00FFFFFFu;
+    const bool ext = (packed >> 27) & 1u;
+    if (!ext || symbolnum >= nsyms) continue;
+
+    uint32_t n_strx;
+    memcpy(&n_strx, symtab + symbolnum * 12, 4);
+    if (n_strx >= strsize) continue;
+
+    Binding b;
+    // r_address is an offset from the first segment's vmaddr, which for these
+    // images is the link base.
+    b.address = link_base_ + uint32_t(r_address);
+    b.symbol = strings + n_strx;
+    b.dylib = "(classic relocation)";
+    b.lazy = false;
+    if (!b.symbol.empty()) bindings_.push_back(b);
+  }
 }
 
 // The dyld bind opcodes: a small stack machine that writes symbol addresses
