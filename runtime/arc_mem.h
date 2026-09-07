@@ -36,6 +36,12 @@ uint32_t arc_guest_strdup(const char* s);
 // It grows down from here, as the architecture expects.
 uint32_t arc_guest_stack_top(void);
 
+// The lowest address the stack may reach. A fault just below this is not a
+// wild pointer, it is the guest having recursed until it ran out, and the two
+// want telling apart: one is a bug in the value, the other in the control
+// flow.
+uint32_t arc_guest_stack_bottom(void);
+
 // Whether an address is inside anything the guest owns. A shim that is handed
 // a pointer should ask before dereferencing it, because a guest that has gone
 // wrong will hand over nonsense and the resulting fault is far less useful

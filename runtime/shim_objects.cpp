@@ -263,6 +263,43 @@ void LocalizedStringForKey(Arm32Ctx* c) {
 // game already handles it.
 void NilMethod(Arm32Ctx* c) { ARC_W(c, 0, 0); }
 
+// Parsing a number out of a string. Answering these with nil means every
+// value a game reads from a config file or a bundle key is zero, and a game
+// that checks its own configuration then reports an error about it -- which is
+// how Angry Birds ends up building an exception message at startup.
+void StringFloatValue(Arm32Ctx* c) {
+  const std::string t = StringText(ARC_R(c, 0));
+  float f = 0.0f;
+  try { f = std::stof(t); } catch (...) { f = 0.0f; }
+  uint32_t bits;
+  std::memcpy(&bits, &f, 4);
+  ARC_W(c, 0, bits);
+}
+
+void StringIntValue(Arm32Ctx* c) {
+  const std::string t = StringText(ARC_R(c, 0));
+  long v = 0;
+  try { v = std::stol(t); } catch (...) { v = 0; }
+  ARC_W(c, 0, uint32_t(int32_t(v)));
+}
+
+void StringDoubleValue(Arm32Ctx* c) {
+  const std::string t = StringText(ARC_R(c, 0));
+  double d = 0.0;
+  try { d = std::stod(t); } catch (...) { d = 0.0; }
+  uint64_t bits;
+  std::memcpy(&bits, &d, 8);
+  ARC_W(c, 0, uint32_t(bits));
+  ARC_W(c, 1, uint32_t(bits >> 32));
+}
+
+void StringBoolValue(Arm32Ctx* c) {
+  const std::string t = StringText(ARC_R(c, 0));
+  const bool yes = !t.empty() && (t[0] == 'Y' || t[0] == 'y' || t[0] == 'T' ||
+                                  t[0] == 't' || (t[0] >= '1' && t[0] <= '9'));
+  ARC_W(c, 0, yes ? 1u : 0u);
+}
+
 void URLWithString(Arm32Ctx* c) {
   const uint32_t obj = HostAllocInstance(HostClass("NSURL", "NSObject"));
   if (obj) Strings()[obj] = StringText(ARC_R(c, 2));
@@ -1009,6 +1046,16 @@ const Entry kEntries[] = {
     {"NSOperationQueue", false, "addOperation:", AddOperation},
 
     {"UIApplication", false, "setStatusBarOrientation:animated:", Nop},
+    {"UIApplication", false, "setStatusBarOrientation:", Nop},
+    {"UIApplication", false, "setStatusBarHidden:", Nop},
+    {"UIApplication", false, "setStatusBarHidden:animated:", Nop},
+    {"UIApplication", false, "setIdleTimerDisabled:", Nop},
+    // No hardware to read, and a game that asks is entitled to an object it
+    // can set a delegate on rather than a nil it will send to anyway.
+    {"UIAccelerometer", true, "sharedAccelerometer",
+     [](Arm32Ctx* c) { ARC_W(c, 0, Singleton("UIAccelerometer")); }},
+    {"UIAccelerometer", false, "setUpdateInterval:", Nop},
+    {"UIAccelerometer", false, "setDelegate:", Nop},
     {"UIApplication", true, "sharedApplication", Nop},
 
     {"NSString", true, "stringWithString:", StringWithString},
@@ -1016,6 +1063,11 @@ const Entry kEntries[] = {
     {"NSString", true, "stringWithFormat:", StringWithFormat},
     {"NSString", true, "stringWithContentsOfURL:encoding:error:", NilMethod},
     {"NSString", false, "UTF8String", UTF8String},
+    {"NSString", false, "floatValue", StringFloatValue},
+    {"NSString", false, "intValue", StringIntValue},
+    {"NSString", false, "integerValue", StringIntValue},
+    {"NSString", false, "doubleValue", StringDoubleValue},
+    {"NSString", false, "boolValue", StringBoolValue},
     {"NSString", false, "length", StringLength},
     {"NSString", false, "isEqualToString:", IsEqualToString},
     {"NSMutableString", true, "stringWithFormat:", StringWithFormat},

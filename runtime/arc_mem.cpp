@@ -106,6 +106,8 @@ uint32_t arc_guest_strdup(const char* s) {
   return p;
 }
 
+uint32_t arc_guest_stack_bottom(void) { return kStackBase; }
+
 uint32_t arc_guest_stack_top(void) {
   // Sixteen bytes clear of the end and eight-aligned, which is what the
   // procedure call standard requires at a public entry point.

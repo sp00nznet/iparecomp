@@ -105,6 +105,19 @@ void DescribeAddress(uintptr_t at) {
 LONG WINAPI OnFault(EXCEPTION_POINTERS* info) {
   const DWORD code = info->ExceptionRecord->ExceptionCode;
   if (code != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+  // Only the first fault is a finding; everything after it is a consequence.
+  // Letting normal handling continue means a faulting instruction can be
+  // retried or a cleanup path can fault in turn, and this handler is then
+  // re-entered -- thousands of times, in the case that prompted this, burying
+  // the one report worth reading under 27,000 identical lines. A report that
+  // repeats is not a report.
+  static long seen = 0;
+  if (seen++) {
+    if (seen == 2)
+      std::printf("  (further faults suppressed; the first one above is the "
+                  "one that matters)\n");
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
   const ULONG_PTR kind = info->ExceptionRecord->ExceptionInformation[0];
   const uintptr_t at = uintptr_t(info->ExceptionRecord->ExceptionInformation[1]);
   std::printf("\nthe guest faulted: %s %p\n",
@@ -113,6 +126,17 @@ LONG WINAPI OnFault(EXCEPTION_POINTERS* info) {
                           : "executing",
               reinterpret_cast<void*>(at));
   DescribeAddress(at);
+  // "is free" is true and useless. A write just below the stack is the guest
+  // having recursed until it ran out, which is a bug in the control flow
+  // rather than in a pointer, and the report should not make anyone work that
+  // out from two hex numbers.
+  const uint32_t bottom = arc_guest_stack_bottom();
+  if (at < bottom && bottom - at < 0x10000) {
+    std::printf("  that is %u bytes below the bottom of the guest stack: it "
+                "ran out of stack,\n  which on a trail of one repeating "
+                "function means unbounded recursion\n",
+                unsigned(bottom - uint32_t(at)));
+  }
   // Executing an address that is mapped is the giveaway for calling guest
   // code natively -- it is machine code for another architecture.
   if (kind == 8)
