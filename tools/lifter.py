@@ -891,10 +891,28 @@ class Lifter:
         raise Unsupported(form(ins))
 
     def _vmrs(self, ins, op: str) -> str:
-        # `vmrs apsr_nzcv, fpscr` is the only form that appears, and it is the
-        # second half of every float comparison.
+        # `vmrs apsr_nzcv, fpscr` is the second half of every float
+        # comparison, and it was the only form Canabalt contained.
         if "apsr_nzcv" in ins.op_str and "fpscr" in ins.op_str:
             return "arc_vmrs_nzcv(c);"
+        # Reading FPSCR into a general register. Angry Birds does this in
+        # `applicationDidFinishLaunching:` -- it is how code saves the
+        # rounding mode and exception bits before changing them, so it turns
+        # up in any binary that touches the FP environment rather than just
+        # comparing floats.
+        ops = ins.operands
+        if len(ops) == 2 and "fpscr" in ins.op_str:
+            # `vmsr fpscr, rN` is the other half of the same idiom: read it,
+            # change the rounding or exception bits, put it back. The flag
+            # bits are the emitter's own, so only the rest is stored.
+            if op == "vmsr" and ops[1].type == ca.ARM_OP_REG:
+                rn = self.reg(ins, ops[1].reg)
+                if rn != 15:
+                    return f"c->fpscr = ARC_R(c, {rn});"
+            elif ops[0].type == ca.ARM_OP_REG:
+                rd = self.reg(ins, ops[0].reg)
+                if rd != 15:
+                    return f"ARC_W(c, {rd}, c->fpscr);"
         raise Unsupported(form(ins))
 
     # --- control flow ------------------------------------------------------
@@ -938,7 +956,10 @@ class Lifter:
             # carries is what lets an out-of-range selector fall through to
             # the default -- so the conditional wrapper at the end of this
             # function is exactly the right thing to leave it to.
-            idx = self.reg(ins, ins.operands[1].mem.index)
+            ops_t = ins.operands
+            idx = self.reg(ins, ops_t[1].mem.index) \
+                if ops_t[1].type == ca.ARM_OP_MEM \
+                else self.reg(ins, ops_t[2].reg)
             arms = " ".join(f"case {k}: goto L_{t:08x};"
                             for k, t in enumerate(table))
             body = f"switch (ARC_R(c, {idx})) {{ {arms} default: break; }}"
@@ -979,7 +1000,7 @@ class Lifter:
             body = self._vcmp(ins, op)
         elif op == "vcvt":
             body = self._vcvt(ins, op)
-        elif op == "vmrs":
+        elif op in ("vmrs", "vmsr"):
             body = self._vmrs(ins, op)
         else:
             body = self._misc(ins, op)
@@ -1046,16 +1067,36 @@ class Lifter:
         """
         ins = insns[a]
         ops = ins.operands
-        if len(ops) != 2 or ops[0].type != ca.ARM_OP_REG:
+        op = self.root(ins)
+        idx = None
+        indirect = False
+        stride = 4
+        if op == "ldr" and len(ops) == 2 and ops[0].type == ca.ARM_OP_REG \
+                and self.reg(ins, ops[0].reg) == 15 \
+                and ops[1].type == ca.ARM_OP_MEM:
+            # `ldr pc, [pc, rN, lsl #2]` -- the table holds addresses.
+            mem = ops[1].mem
+            if mem.base and self.reg(ins, mem.base) == 15 and mem.index \
+                    and ops[1].shift.value == 2:
+                idx = self.reg(ins, mem.index)
+                indirect = True
+        elif op == "add" and len(ops) == 3 \
+                and ops[0].type == ca.ARM_OP_REG \
+                and self.reg(ins, ops[0].reg) == 15 \
+                and ops[1].type == ca.ARM_OP_REG \
+                and self.reg(ins, ops[1].reg) == 15 \
+                and ops[2].type == ca.ARM_OP_REG \
+                and ops[2].shift.value in (2, 3):
+            # `add pc, pc, rN, lsl #k` -- the table *is* the code, so the
+            # targets are computed and there is nothing to read. The shift is
+            # the slot size: lsl #2 is one branch per case, lsl #3 is two
+            # instructions per case, and a compiler picks whichever the case
+            # bodies fit in. Assuming the first is how the second lands every
+            # case after the zeroth on the wrong instruction.
+            idx = self.reg(ins, ops[2].reg)
+            stride = 1 << ops[2].shift.value
+        if idx is None:
             return None
-        if self.reg(ins, ops[0].reg) != 15 or ops[1].type != ca.ARM_OP_MEM:
-            return None
-        mem = ops[1].mem
-        if not mem.base or self.reg(ins, mem.base) != 15 or not mem.index:
-            return None
-        if ops[1].shift.value != 2:        # a table of words, scaled by 4
-            return None
-        idx = self.reg(ins, mem.index)
 
         # The bound lives in the compare that set the condition this load is
         # predicated on. An unconditional load of the PC has no bound at all
@@ -1068,11 +1109,19 @@ class Lifter:
                 break
             prev = insns[b]
             pops = prev.operands
-            if prev.mnemonic.split(".")[0] == "cmp" and len(pops) == 2 \
+            root = prev.mnemonic.split(".")[0]
+            if root in ("cmp", "rsbs") and len(pops) >= 2 \
                     and pops[0].type == ca.ARM_OP_REG \
                     and self.reg(prev, pops[0].reg) == idx \
-                    and pops[1].type == ca.ARM_OP_IMM:
-                count = pops[1].imm + 1
+                    and pops[-1].type == ca.ARM_OP_IMM:
+                # `cmp rN, #K` states the bound outright. `rsbs rN, rN, #K`
+                # does not -- it computes K - rN, and the range is a property
+                # of what fed it, which here is a difference of two clz
+                # results. Taking K + 1 is an inference, and it is allowed
+                # only because every slot is checked below against being a
+                # real instruction inside this same function: a wrong bound
+                # cannot quietly produce targets, it produces a refusal.
+                count = pops[-1].imm + 1
                 break
             b -= prev.size
         if not count or count < 1 or count > 4096:
@@ -1081,13 +1130,19 @@ class Lifter:
         base = a + 8                       # the ARM PC bias, not a guess
         out = []
         for k in range(count):
-            word = self.literal(base + k * 4, 4)
-            # Every entry has to be an instruction in this same function. A
-            # word that is not says the bound was wrong, and a wrong bound
-            # means reading whatever follows the table as addresses.
-            if word is None or (word & 0xFFFFFFFE) not in insns:
+            if indirect:
+                word = self.literal(base + k * 4, 4)
+                if word is None:
+                    return None
+                target = word & 0xFFFFFFFE
+            else:
+                target = base + k * stride
+            # Every entry has to be an instruction in this same function. One
+            # that is not says the bound was wrong, and a wrong bound means
+            # treating whatever follows the table as branch targets.
+            if target not in insns:
                 return None
-            out.append(word & 0xFFFFFFFE)
+            out.append(target)
         return out
 
     def reachable(self, insns: dict, start: int) -> set[int]:
@@ -1117,7 +1172,7 @@ class Lifter:
                 if t in insns:
                     work.append(t)
             # A switch reaches its case bodies only through the table.
-            if ends and op == "ldr" and a not in self.tables:
+            if ends and op in ("ldr", "add") and a not in self.tables:
                 table = self.jump_table(insns, a)
                 if table:
                     self.tables[a] = table
